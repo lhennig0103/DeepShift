@@ -1,6 +1,6 @@
-numpy==1.16.2
-opencv-python==4.1.0.25
-Pillow==6.0.0
-termcolor==1.1.0
-torch==1.1.0
-torchvision==0.2.2.post3
+numpy
+opencv-python
+Pillow
+termcolor
+torch
+torchvision
