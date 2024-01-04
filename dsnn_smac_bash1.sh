@@ -6,5 +6,6 @@
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:3
 
+conda init bash
 conda activate dsnn_smac
 python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/smac_dsnn_mf.py
