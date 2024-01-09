@@ -840,16 +840,6 @@ class DSNN:
         return test_loss, correct
 
 
-dsnn = DSNN()  # Replace with your DSNN class
-# Scenario object specifying the optimization environment
-scenario = Scenario(dsnn.configspace, trial_walltime_limit=3000, n_trials=100)
-
-# Use SMAC to find the best configuration/hyperparameters
-smac = HyperparameterOptimizationFacade(scenario, dsnn.train)
-incumbent = smac.optimize()
-print(incumbent, smac.validate)
-
-
 def plot_trajectory(facades: List[AbstractFacade]) -> None:
     """Plots the trajectory (incumbents) of the optimization process."""
     plt.figure()
@@ -920,6 +910,7 @@ if __name__ == "__main__":
         print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
 
         facades.append(smac)
+        print(incumbent, smac.validate)
 
     # Let's plot it
-    plot_trajectory(facades)
+    # plot_trajectory(facades)
