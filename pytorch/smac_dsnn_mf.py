@@ -19,6 +19,7 @@ import copy
 from typing import List
 from matplotlib import pyplot as plt
 
+
 import deepshift
 import unoptimized
 from deepshift.convert import convert_to_shift, round_shift_weights, count_layer_type
@@ -41,6 +42,11 @@ from ConfigSpace import (
     InCondition,
     Integer,
 )
+
+import multiprocessing as mp
+
+if __name__ == "__main__":
+    mp.set_start_method('spawn')
 
 print(torch.cuda.is_available())
 
@@ -246,6 +252,8 @@ class DSNN:
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
+    # device = torch.device("cpu")
+    # use_cuda = False
     kwargs = {"num_workers": args.workers, "pin_memory": True} if use_cuda else {}
 
     if args.model:
@@ -606,7 +614,7 @@ class DSNN:
             )
             args = parser.parse_args()
             use_cuda = not args.no_cuda and torch.cuda.is_available()
-
+            # use_cuda = False
             args.model_type = config["model_type"]
             args.batch_size = config["batch_size"]
             args.test_batch_size = config["test_batch_size"]
@@ -913,4 +921,6 @@ if __name__ == "__main__":
         print(incumbent, smac.validate)
 
     # Let's plot it
-    # plot_trajectory(facades)
+    print(incumbent)
+    plot_trajectory(facades)
+
