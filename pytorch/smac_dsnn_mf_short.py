@@ -86,13 +86,21 @@ class DSNN:
                                         self.model_config['shift_type'], 
                                         convert_all_linear=(self.model_config['type'] != 'linear'), 
                                         convert_weights=True, 
+<<<<<<< HEAD
                                         use_kernel=self.model_config['use_kernel'], 
+=======
+                                        # use_kernel=self.model_config['use_kernel'], 
+>>>>>>> a3ff2934c6fb2d7539061d190f7468c8a273337a
                                         use_cuda=(self.device.type == 'cuda'), 
                                         rounding=self.model_config['rounding'], 
                                         weight_bits=self.model_config['weight_bits'], 
                                         act_integer_bits=self.model_config['activation_integer_bits'], 
                                         act_fraction_bits=self.model_config['activation_fraction_bits'])
+<<<<<<< HEAD
         elif self.model_config['use_kernel'] and self.model_config['shift_depth'] == 0:
+=======
+        elif self.model_config['shift_depth'] == 0:
+>>>>>>> a3ff2934c6fb2d7539061d190f7468c8a273337a
             model = convert_to_unoptimized(model)
 
         return model.to(self.device)
@@ -174,10 +182,16 @@ def create_configspace():
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32))
     shift_depth = Integer("shift_depth", (0, 1500))
     shift_type = Categorical("shift_type", ["Q", "PS"])
+<<<<<<< HEAD
+=======
+    # use_kernel = Categorical("use_kernel", ["False"])
+    rounding = Categorical("rounding", ["deterministic", "stochastic"])
+>>>>>>> a3ff2934c6fb2d7539061d190f7468c8a273337a
 
     cs.add_hyperparameters([model_type, batch_size, test_batch_size, optimizer_type,
                             learning_rate, momentum, num_epochs, weight_bits,
-                            activation_integer_bits, activation_fraction_bits, shift_depth])
+                            activation_integer_bits, activation_fraction_bits, shift_depth, shift_type, #use_kernel
+                            rounding])
 
     return cs
 
@@ -190,7 +204,10 @@ def train_model(config, seed: int = 0, budget: int = 25):
         'weight_bits': config['weight_bits'],
         'activation_integer_bits': config['activation_integer_bits'],
         'activation_fraction_bits': config['activation_fraction_bits'],
-        'shift_depth': config['shift_depth']
+        'shift_depth': config['shift_depth'],
+        'shift_type': config['shift_type'],
+        # 'use_kernel': config['use_kernel'],
+        'rounding': config['rounding']
     }
 
     train_config = {
