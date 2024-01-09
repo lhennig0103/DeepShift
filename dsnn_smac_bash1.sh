@@ -6,6 +6,7 @@
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:3
 
-conda init bash
+source /opt/software/pc2/EB-SW/software/Anaconda3/2022.05/etc/profile.d/conda.sh
 conda activate dsnn_smac
+
 python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/smac_dsnn_mf.py
