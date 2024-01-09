@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -t 12:00:00
+#SBATCH -t 4:00:00
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -J "dsnn_smac_1"
@@ -9,4 +9,4 @@
 source /opt/software/pc2/EB-SW/software/Anaconda3/2022.05/etc/profile.d/conda.sh
 conda activate dsnn_smac
 
-python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/smac_dsnn_mf.py
+python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/smac_dsnn_mf_short.py
