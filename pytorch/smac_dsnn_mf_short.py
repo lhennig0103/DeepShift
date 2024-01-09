@@ -80,8 +80,22 @@ class DSNN:
         else:
             raise ValueError("Unknown model type specified")
 
-        # Additional model configurations can be added here
-        return model
+        # Apply Deep Shift conversion
+        if self.model_config['shift_depth'] > 0:
+            model, _ = convert_to_shift(model, self.model_config['shift_depth'], 
+                                        self.model_config['shift_type'], 
+                                        convert_all_linear=(self.model_config['type'] != 'linear'), 
+                                        convert_weights=True, 
+                                        # use_kernel=self.model_config['use_kernel'], 
+                                        use_cuda=(self.device.type == 'cuda'), 
+                                        rounding=self.model_config['rounding'], 
+                                        weight_bits=self.model_config['weight_bits'], 
+                                        act_integer_bits=self.model_config['activation_integer_bits'], 
+                                        act_fraction_bits=self.model_config['activation_fraction_bits'])
+        elif self.model_config['shift_depth'] == 0:
+            model = convert_to_unoptimized(model)
+
+        return model.to(self.device)
     
     def _initialize_optimizer(self):
         # Optimizer initialization based on self.model_config
@@ -159,10 +173,14 @@ def create_configspace():
     activation_integer_bits = Integer("activation_integer_bits", (2, 32))
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32))
     shift_depth = Integer("shift_depth", (0, 1500))
+    shift_type = Categorical("shift_type", ["Q", "PS"])
+    # use_kernel = Categorical("use_kernel", ["False"])
+    rounding = Categorical("rounding", ["deterministic", "stochastic"])
 
     cs.add_hyperparameters([model_type, batch_size, test_batch_size, optimizer_type,
                             learning_rate, momentum, num_epochs, weight_bits,
-                            activation_integer_bits, activation_fraction_bits, shift_depth])
+                            activation_integer_bits, activation_fraction_bits, shift_depth, shift_type, #use_kernel
+                            rounding])
 
     return cs
 
@@ -175,7 +193,10 @@ def train_model(config, seed: int = 0, budget: int = 25):
         'weight_bits': config['weight_bits'],
         'activation_integer_bits': config['activation_integer_bits'],
         'activation_fraction_bits': config['activation_fraction_bits'],
-        'shift_depth': config['shift_depth']
+        'shift_depth': config['shift_depth'],
+        'shift_type': config['shift_type'],
+        # 'use_kernel': config['use_kernel'],
+        'rounding': config['rounding']
     }
 
     train_config = {
