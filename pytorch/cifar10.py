@@ -24,12 +24,29 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
+from smac import HyperparameterOptimizationFacade, Scenario
+from smac.intensifier import Hyperband
+from smac.facade import MultiFidelityFacade as MFFacade
+from smac.facade import AbstractFacade
+from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float
+
+
 import torchsummary
 import optim
 
 from deepshift.convert import convert_to_shift, round_shift_weights, count_layer_type
 from unoptimized.convert import convert_to_unoptimized
 import unoptimized
+
+import matplotlib.pyplot as plt
+from typing import List
+import multiprocessing as mp
+
+from smac import HyperparameterOptimizationFacade, Scenario
+from smac.intensifier import Hyperband
+from smac.facade import MultiFidelityFacade as MFFacade
+from smac.facade import AbstractFacade
+from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float, ForbiddenAndConjunction, ForbiddenEqualsClause
 
 import cifar10_models as models
 
@@ -42,6 +59,10 @@ original paper. The purpose of resnet_cifar10 (which has been obtained from http
 is to provide a valid pytorch implementation of ResNet-s for CIFAR10 as described in the original paper. 
 '''
 
+# Set the start method for multiprocessing
+if __name__ == '__main__':
+    mp.set_start_method('spawn')
+    
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -52,98 +73,23 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
-parser.add_argument('--model', default='', type=str, metavar='MODEL_PATH',
-                    help='path to model file to load both its architecture and weights (default: none)')
-parser.add_argument('--weights', default='', type=str, metavar='WEIGHTS_PATH',
-                    help='path to file to load its weights (default: none)')
-parser.add_argument('-s', '--shift-depth', type=int, default=0,
-                    help='how many layers to convert to shift')
-parser.add_argument('-st', '--shift-type', default='PS', choices=['Q', 'PS'],
-                    help='type of DeepShift method for training and representing weights (default: PS)')
-parser.add_argument('-r', '--rounding', default='deterministic', choices=['deterministic', 'stochastic'],
-                    help='type of rounding (default: deterministic)')
-parser.add_argument('-wb', '--weight-bits', type=int, default=5,
-                    help='number of bits to represent the shift weights')
-parser.add_argument('-ab', '--activation-bits', nargs='+', default=[16,16],
-                    help='number of integer and fraction bits to represent activation (fixed point format)')               
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
-                    help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-                    help='manual epoch number (useful on restarts)')
-parser.add_argument('-opt', '--optimizer', metavar='OPT', default="SGD", 
-                    help='optimizer algorithm')
-parser.add_argument('-b', '--batch-size', default=128, type=int,
-                    metavar='N',
-                    help='mini-batch size (default: 128), this is the total '
-                         'batch size of all GPUs on the current node when '
-                         'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('-alt', '--alternate-update', default=False, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='every other epoch, only update either sign or shift parameters')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-                    metavar='LR', help='initial learning rate', dest='lr')
-parser.add_argument('--lr-schedule', dest='lr_schedule', default=True, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='using learning rate schedule')
-parser.add_argument('--lr-step-size', default=None, type=int,
-                    help='number of epochs to decay learning rate by factor of 10')
-parser.add_argument('--lr-sign', default=None, type=float,
-                    help='separate initial learning rate for sign params')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                    help='momentum')
-parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)',
-                    dest='weight_decay')
-parser.add_argument('-p', '--print-freq', default=50, type=int,
-                    metavar='N', help='print frequency (default: 50)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
-parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                    help='only evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', default=False, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='use pre-trained model')
-parser.add_argument('--freeze', dest='freeze', default=False, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='freeze pre-trained weights')
-parser.add_argument('--world-size', default=-1, type=int,
-                    help='number of nodes for distributed training')
-parser.add_argument('--rank', default=-1, type=int,
-                    help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
-                    help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='nccl', type=str,
-                    help='distributed backend')
-parser.add_argument('--seed', default=None, type=int,
-                    help='seed for initializing training. ')
-parser.add_argument('--gpu', default=None, type=int,
-                    help='GPU id to use.')
-parser.add_argument('--multiprocessing-distributed', action='store_true',
-                    help='Use multi-processing distributed training to launch '
-                         'N processes per node, which has N GPUs. This is the '
-                         'fastest way to use PyTorch for either single node or '
-                         'multi node data parallel training')
-
-parser.add_argument('--save-model', default=True, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='For Saving the current Model (default: True)')
-parser.add_argument('--print-weights', default=True, type=lambda x:bool(distutils.util.strtobool(x)), 
-                    help='For printing the weights of Model (default: True)')
-parser.add_argument('--desc', type=str, default=None,
-                    help='description to append to model directory name')
-parser.add_argument('--use-kernel', type=lambda x:bool(distutils.util.strtobool(x)), default=False,
-                    help='whether using custom shift kernel')
-
 
 best_acc1 = 0
+args = parser.parse_args()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def main():
-    args = parser.parse_args()
+def main(cfg, fixed_params):
+    global best_acc1
 
-    if(args.evaluate is False and args.use_kernel is True):
+    if not fixed_params['evaluate'] and fixed_params['use_kernel']:
         raise ValueError('Our custom kernel currently supports inference only, not training.')
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
+
+    # Fixed parameter setup
+    if fixed_params['seed'] is not None:
+        random.seed(fixed_params['seed'])
+        torch.manual_seed(fixed_params['seed'])
         cudnn.deterministic = True
         warnings.warn('You have chosen to seed training. '
                       'This will turn on the CUDNN deterministic setting, '
@@ -151,80 +97,119 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    if args.gpu is not None:
+    if fixed_params['gpu'] is not None:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
+    if fixed_params['dist_url'] == "env://" and fixed_params['world_size'] == -1:
+        fixed_params['world_size'] = int(os.environ["WORLD_SIZE"])
 
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
-    assert len(args.activation_bits)==2, "activation-bits argument needs to be a tuple of 2 values representing number of integer bits and number of fraction bits, e.g., '3 5' for 8-bits fixed point or '3 13' for 16-bits fixed point"
-    [args.activation_integer_bits, args.activation_fraction_bits] = args.activation_bits
-    [args.activation_integer_bits, args.activation_fraction_bits] = [int(args.activation_integer_bits), int(args.activation_fraction_bits)]
+    fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
 
     ngpus_per_node = torch.cuda.device_count()
-    if args.multiprocessing_distributed:
+    if fixed_params['multiprocessing_distributed']:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
+        fixed_params['world_size'] = ngpus_per_node * fixed_params['world_size']
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, cfg, fixed_params))
     else:
         # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+        main_worker(fixed_params['gpu'], ngpus_per_node, cfg, fixed_params)
+
+    cs = create_configspace()
+    facades: list[AbstractFacade] = []
+    scenario = Scenario(
+            cs,
+            trial_walltime_limit=3000,  # After 60 seconds, we stop the hyperparameter optimization
+            n_trials=50,  # Evaluate max 500 different trials
+            min_budget=1,  # Train the MLP using a hyperparameter configuration for at least 5 epochs
+            max_budget=25,  # Train the MLP using a hyperparameter configuration for at most 25 epochs
+            n_workers=1,
+        )
+    
+    # Create our intensifier
+    intensifier_object = Hyperband
+    intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
+    
+    # We want to run five random configurations before starting the optimization.
+    initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
+
+    smac = MFFacade(
+            scenario,
+            train_model,
+            initial_design=initial_design,
+            intensifier=intensifier,
+            overwrite=True,
+        )
+    incumbent = smac.optimize()
+
+    # Get cost of default configuration
+    default_cost = smac.validate(cs.get_default_configuration())
+    print(f"Default cost ({intensifier.__class__.__name__}): {default_cost}")
+
+    # Let's calculate the cost of the incumbent
+    incumbent_cost = smac.validate(incumbent)
+    print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
+
+    facades.append(smac)
+    
+    print(incumbent, smac.validate)
+    plot_trajectory(facades)
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
     global best_acc1
-    args.gpu = gpu
-    num_classes = 10
 
-    if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
+    # if gpu is not None:
+    #     torch.cuda.set_device(gpu)
+    #     model = model.cuda(gpu)
+    # else:
+    #     model = torch.nn.DataParallel(model).cuda()
 
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
+
+    # Initialize distributed training if required
+    if fixed_params['distributed']:
+        if fixed_params['dist_url'] == "env://" and fixed_params['rank'] == -1:
+            fixed_params['rank'] = int(os.environ["RANK"])
+        if fixed_params['multiprocessing_distributed']:
             # For multiprocessing distributed training, rank needs to be the
             # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-    # create model
-    if args.model:
-        if args.arch or args.pretrained:
-            print("WARNING: Ignoring arguments \"arch\" and \"pretrained\" when creating model...")
+            fixed_params['rank'] = fixed_params['rank'] * ngpus_per_node + gpu
+        dist.init_process_group(backend=fixed_params['dist_backend'], init_method=fixed_params['dist_url'],
+                                world_size=fixed_params['world_size'], rank=fixed_params['rank'])
+
+    # Create model
+    if 'model' in fixed_params and cfg['model']:  # If a model path is specified in cfg
+        if args.arch or cfg.get('pretrained'):
+            print("WARNING: Ignoring 'arch' and 'pretrained' arguments when loading model from path...")
         model = None
-        saved_checkpoint = torch.load(args.model)
+        saved_checkpoint = torch.load(cfg['model'])
         if isinstance(saved_checkpoint, nn.Module):
             model = saved_checkpoint
-        elif "model" in saved_checkpoint:   
+        elif "model" in saved_checkpoint:
             model = saved_checkpoint["model"]
         else:
-            raise Exception("Unable to load model from " + args.model)   
+            raise Exception("Unable to load model from " + cfg['model'])
 
-        if (args.gpu is not None):
-            model.cuda(args.gpu) 
-    elif args.pretrained:
+        model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
+    elif fixed_params['pretrained']:  # If using a pretrained model
         print("=> using pre-trained model '{}'".format(args.arch))
-        model = models.__dict__[args.arch](pretrained=True)
-    else:
+        model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
+    else:  # Creating a new model
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
+        model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
 
     model_rounded = None
-
-    #TODO: add option for finetune vs. feature extraction that only work if pretrained weights are imagenet    
-    if args.freeze and args.pretrained != "none":
+    
+    if fixed_params['freeze'] and fixed_params['pretrained']:
         for param in model.parameters():
             param.requires_grad = False
 
-    if args.weights:
-        saved_weights = torch.load(args.weights)
+    if 'weights' in fixed_params and fixed_params['weights']:
+        saved_weights = torch.load(fixed_params['weights'])
         if isinstance(saved_weights, nn.Module):
             state_dict = saved_weights.state_dict()
         elif "state_dict" in saved_weights:
@@ -238,170 +223,164 @@ def main_worker(gpu, ngpus_per_node, args):
             # create new OrderedDict that does not contain module.
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k[7:] # remove module.
+                name = k[7:] # remove `module.`
                 new_state_dict[name] = v
                 
             model.load_state_dict(new_state_dict)
 
-    if args.shift_depth > 0:
-        model, _ = convert_to_shift(model, args.shift_depth, args.shift_type, convert_weights = (args.pretrained != "none" or args.weights), use_kernel = args.use_kernel, rounding = args.rounding, weight_bits = args.weight_bits, act_integer_bits = args.activation_integer_bits, act_fraction_bits = args.activation_fraction_bits)
-    elif args.use_kernel and args.shift_depth == 0:
+    if cfg['shift_depth'] > 0:
+        model, _ = convert_to_shift(model, cfg['shift_depth'], cfg['shift_type'], 
+                                    convert_weights=(fixed_params['pretrained'] or fixed_params['weights']), 
+                                    use_kernel=fixed_params.get('use_kernel', False), 
+                                    rounding=cfg.get('rounding', 'deterministic'), 
+                                    weight_bits=cfg.get('weight_bits', 5), 
+                                    act_integer_bits=cfg.get('activation_integer_bits', 16), 
+                                    act_fraction_bits=cfg.get('activation_fraction_bits', 16))
+    elif fixed_params['use_kernel']==False and cfg.get('shift_depth', 0) == 0:
         model = convert_to_unoptimized(model)
 
-    if args.distributed:
+
+    if fixed_params['distributed']:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int(args.workers / ngpus_per_node)
-            #TODO: Allow args.gpu to be a list of IDs
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        if gpu is not None:
+            torch.cuda.set_device(gpu)
+            model.cuda(gpu)
+            # Adjusting batch size and workers based on the number of GPUs
+            cfg['batch_size'] = int(cfg['batch_size'] / ngpus_per_node)
+            fixed_params['workers'] = int(fixed_params['workers'] / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
             model = torch.nn.parallel.DistributedDataParallel(model)
-    elif args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
+    elif gpu is not None:
+        torch.cuda.set_device(gpu)
+        model = model.cuda(gpu)
     else:
         # DataParallel will divide and allocate batch_size to all available GPUs
-        if (args.arch.startswith('alexnet')):
+        if args.arch.startswith('alexnet'):
             model.features = torch.nn.DataParallel(model.features)
             model.cuda()
         else:
             model = torch.nn.DataParallel(model).cuda()
 
-    # define loss function (criterion)
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    # Define loss function (criterion)
+    criterion = nn.CrossEntropyLoss().cuda(gpu if gpu is not None else 0)
 
-    # create optimizer
+    # Create optimizer
     model_other_params = []
     model_sign_params = []
     model_shift_params = []
 
     for name, param in model.named_parameters():
-        if(name.endswith(".sign")):
+        if name.endswith(".sign"):
             model_sign_params.append(param)
-        elif(name.endswith(".shift")):
+        elif name.endswith(".shift"):
             model_shift_params.append(param)
         else:
             model_other_params.append(param)
 
+    lr_sign = cfg['lr']
     params_dict = [
         {"params": model_other_params},
-        {"params": model_sign_params, 'lr': args.lr_sign if args.lr_sign is not None else args.lr, 'weight_decay': 0},
-        {"params": model_shift_params, 'lr': args.lr, 'weight_decay': 0}
-        ]
+        {"params": model_sign_params, 'lr': cfg['lr'], 'weight_decay': 0},
+        {"params": model_shift_params, 'lr': cfg['lr'], 'weight_decay': 0}
+    ]
 
-    # define optimizer
-    optimizer = None 
-    if(args.optimizer.lower() == "sgd"):
-        optimizer = torch.optim.SGD(params_dict, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adadelta"):
-        optimizer = torch.optim.Adadelta(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adagrad"):
-        optimizer = torch.optim.Adagrad(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adam"):
-        optimizer = torch.optim.Adam(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "rmsprop"):
-        optimizer = torch.optim.RMSprop(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "radam"):
-        optimizer = optim.RAdam(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "ranger"):
-        optimizer = optim.Ranger(params_dict, args.lr, weight_decay=args.weight_decay)
+    # Define optimizer based on cfg
+    optimizer = None
+    optimizer_type = cfg['optimizer'].lower()
+    if optimizer_type == "sgd":
+        optimizer = torch.optim.SGD(params_dict, cfg['lr'], momentum=cfg['momentum'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "adadelta":
+        optimizer = torch.optim.Adadelta(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "adagrad":
+        optimizer = torch.optim.Adagrad(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "adam":
+        optimizer = torch.optim.Adam(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "rmsprop":
+        optimizer = torch.optim.RMSprop(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "radam":
+        optimizer = optim.RAdam(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
+    elif optimizer_type == "ranger":
+        optimizer = optim.Ranger(params_dict, cfg['lr'], weight_decay=cfg['weight_decay'])
     else:
-        raise ValueError("Optimizer type: ", args.optimizer, " is not supported or known")
+        raise ValueError("Optimizer type: ", optimizer_type, " is not supported or known")
 
-    # define learning rate schedule
-    if (args.lr_schedule):
-        if (args.lr_step_size is not None):
-            lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size)
-        else:
-            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                                milestones=[80, 120, 160, 180], last_epoch=args.start_epoch - 1)
+
+    #     # Define learning rate schedule
+    # if cfg.get('lr_schedule', False):
+    #     if 'lr_step_size' in cfg and cfg['lr_step_size'] is not None:
+    #         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=cfg['lr_step_size'])
+    #     else:
+    #         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+    #                                                             milestones=[80, 120, 160, 180], last_epoch=cfg.get('start_epoch', 0) - 1)
 
     if args.arch in ['resnet1202', 'resnet110']:
-        # for resnet1202 original paper uses lr=0.01 for first 400 minibatches for warm-up
-        # then switch back. In this implementation it will correspond for first epoch.
+        # Warm-up setting for specific architectures
         for param_group in optimizer.param_groups:
-            param_group['lr'] = args.lr*0.1
+            param_group['lr'] = cfg['lr'] * 0.1
 
-    # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
-            best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
-                # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+    # Optionally resume from a checkpoint
+    if fixed_params.get('resume') and os.path.isfile(fixed_params['resume']):
+        print("=> loading checkpoint '{}'".format(fixed_params['resume']))
+        checkpoint = torch.load(fixed_params['resume'])
+        fixed_params['start_epoch'] = checkpoint['epoch']  # Assuming start_epoch is still managed by cfg
+        best_acc1 = checkpoint['best_acc1']
+        if gpu is not None:
+            best_acc1 = best_acc1.to(gpu)
+        model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        print("=> loaded checkpoint '{}' (epoch {})"
+            .format(fixed_params['resume'], checkpoint['epoch']))
+    else:
+        if fixed_params.get('resume'):
+            print("=> no checkpoint found at '{}'".format(fixed_params['resume']))
 
-    # if evaluating round weights to ensure that the results are due to powers of 2 weights
-    if (args.evaluate):
+    # If evaluating, round weights to ensure that the results are due to powers of 2 weights
+    if fixed_params.get('evaluate', False):
         model = round_shift_weights(model)
+
 
     cudnn.benchmark = True
 
     model_summary = None
+
     try:
-        model_summary, model_params_info = torchsummary.summary_string(model, input_size=(3,32,32))
+        model_summary, model_params_info = torchsummary.summary_string(model, input_size=(3, 32, 32))
         print(model_summary)
         print("WARNING: The summary function reports duplicate parameters for multi-GPU case")
     except:
         print("WARNING: Unable to obtain summary of model")
 
-    # name model sub-directory "shift_all" if all layers are converted to shift layers
+    # Naming model sub-directory
     conv2d_layers_count = count_layer_type(model, nn.Conv2d) + count_layer_type(model, unoptimized.UnoptimizedConv2d)
     linear_layers_count = count_layer_type(model, nn.Linear) + count_layer_type(model, unoptimized.UnoptimizedLinear)
-    if (args.shift_depth > 0):
-        if (args.shift_type == 'Q'):
-            shift_label = "shift_q"
-        else:
-            shift_label = "shift_ps"
-    else:
-        shift_label = "shift"
+    
+    shift_label = "shift" if cfg['shift_depth'] == 0 else "shift_ps" if cfg['shift_type'] == 'PS' else "shift_q"
+    shift_label += "_all" if conv2d_layers_count == 0 and linear_layers_count == 0 else "_%s" % cfg['shift_depth']
+    shift_label += "_wb_%s" % cfg['weight_bits'] if cfg['shift_depth'] > 0 else ""
 
-    if (conv2d_layers_count==0 and linear_layers_count==0):
-        shift_label += "_all"
-    else:
-        shift_label += "_%s" % (args.shift_depth)
+    # 'desc_label = "_%s" % cfg['desc'] if cfg.get('desc') else ""'
 
-    if (args.shift_depth > 0):
-        shift_label += "_wb_%s" % (args.weight_bits)
+    model_name = '%s/%s' % (args.arch, shift_label)
 
-    if (args.desc is not None and len(args.desc) > 0):
-        desc_label = "_%s" % (args.desc)
-    else:
-        desc_label = ""
-
-    model_name = '%s/%s%s' % (args.arch, shift_label, desc_label)
-
-    if (args.save_model):
+    if fixed_params['save_model'] == False:
         model_dir = os.path.join(os.path.join(os.path.join(os.getcwd(), "models"), "cifar10"), model_name)
-        if not os.path.isdir(model_dir):
-            os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
 
         with open(os.path.join(model_dir, 'command_args.txt'), 'w') as command_args_file:
-            for arg, value in sorted(vars(args).items()):
+            for arg in cfg:
+                value = cfg[arg]
                 command_args_file.write(arg + ": " + str(value) + "\n")
+
 
         with open(os.path.join(model_dir, 'model_summary.txt'), 'w') as summary_file:
             with redirect_stdout(summary_file):
-                if (model_summary is not None):
+                if model_summary is not None:
                     print(model_summary)
                     print("WARNING: The summary function reports duplicate parameters for multi-GPU case")
                 else:
@@ -409,10 +388,9 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     data_dir = "~/pytorch_datasets"
-    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
 
-    normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                     std=[0.2023, 0.1994, 0.2010])
+    normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
 
     train_dataset = datasets.CIFAR10(
         root=data_dir,
@@ -424,126 +402,117 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize,
         ]), download=True)
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset) if fixed_params['distributed'] else None
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+        train_dataset, batch_size=cfg['batch_size'], shuffle=(train_sampler is None),
+        num_workers=fixed_params['workers'], pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.CIFAR10(
             root=data_dir, 
             train=False, 
-            transform=transforms.Compose([
-                transforms.ToTensor(),
-                normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+            transform=transforms.Compose([transforms.ToTensor(), normalize])),
+        batch_size=cfg['batch_size'], shuffle=False,
+        num_workers=fixed_params['workers'], pin_memory=True)
 
     start_time = time.time()
 
-    if args.evaluate:
-        val_log = validate(val_loader, model, criterion, args)
-        val_log = [val_log]
+    # if fixed_params['evaluate']:
+    #     val_log = validate(val_loader, model, criterion, cfg)
+    #     val_log = [val_log]
 
-        with open(os.path.join(model_dir, "test_log.csv"), "w") as test_log_file:
-            test_log_csv = csv.writer(test_log_file)
-            test_log_csv.writerow(['test_loss', 'test_top1_acc', 'test_time'])
-            test_log_csv.writerows(val_log)
-    else:
-        train_log = []
+    #     with open(os.path.join(model_dir, "test_log.csv"), "w") as test_log_file:
+    #         test_log_csv = csv.writer(test_log_file)
+    #         test_log_csv.writerow(['test_loss', 'test_top1_acc', 'test_time'])
+    #         test_log_csv.writerows(val_log)
+    # else:
+    train_log = []
 
-        with open(os.path.join(model_dir, "train_log.csv"), "w") as train_log_file:
+        # with open(os.path.join(model_dir, "train_log.csv"), "w") as train_log_file:
+        #     train_log_csv = csv.writer(train_log_file)
+        #     train_log_csv.writerow(['epoch', 'train_loss', 'train_top1_acc', 'train_time', 'test_loss', 'test_top1_acc', 'test_time'])
+
+    for epoch in range(fixed_params['start_epoch'], cfg['epochs']):
+        if fixed_params['distributed']:
+            train_sampler.set_epoch(epoch)
+
+        # if cfg.get('alternate_update'):
+        #     if epoch % 2 == 1:
+        #         optimizer.param_groups[1]['lr'] = 0
+        #         optimizer.param_groups[2]['lr'] = optimizer.param_groups[0]['lr']
+        #     else:
+        #         optimizer.param_groups[1]['lr'] = optimizer.param_groups[0]['lr']
+        #         optimizer.param_groups[2]['lr'] = 0
+
+        # Train for one epoch
+        # print("current lr ", [param['lr'] for param in optimizer.param_groups])
+        train_epoch_log = train(train_loader, model, criterion, optimizer, epoch, cfg, fixed_params)
+        # if cfg.get('lr_schedule'):
+        #     lr_scheduler.step()
+
+        # Evaluate on validation set
+        val_epoch_log = validate(val_loader, model, criterion, cfg, fixed_params)
+        acc1 = val_epoch_log[2]
+
+        # Append to log
+        with open(os.path.join(model_dir, "train_log.csv"), "a") as train_log_file:
             train_log_csv = csv.writer(train_log_file)
-            train_log_csv.writerow(['epoch', 'train_loss', 'train_top1_acc', 'train_time', 'test_loss', 'test_top1_acc', 'test_time'])
+            train_log_csv.writerow(((epoch,) + train_epoch_log + val_epoch_log)) 
 
-        for epoch in range(args.start_epoch, args.epochs):
-            if args.distributed:
-                train_sampler.set_epoch(epoch)
+        # Remember best acc@1 and save checkpoint
+        is_best = acc1 > best_acc1
+        best_acc1 = max(acc1, best_acc1)
 
-            if(args.alternate_update):
-                if epoch % 2 == 1:
-                    optimizer.param_groups[1]['lr'] = 0
-                    optimizer.param_groups[2]['lr'] = optimizer.param_groups[0]['lr']
-                else:
-                    optimizer.param_groups[1]['lr'] = optimizer.param_groups[0]['lr']
-                    optimizer.param_groups[2]['lr'] = 0
+        if fixed_params.get('print_weights'):
+            with open(os.path.join(model_dir, 'weights_log_' + str(epoch) + '.txt'), 'w') as weights_log_file:
+                with redirect_stdout(weights_log_file):
+                    print("Model's state_dict:")
+                    for param_tensor in model.state_dict():
+                        print(param_tensor, "\t", model.state_dict()[param_tensor].size())
+                        print(model.state_dict()[param_tensor])
 
-            # train for one epoch
-            print("current lr ", [param['lr'] for param in  optimizer.param_groups])
-            train_epoch_log = train(train_loader, model, criterion, optimizer, epoch, args)
-            if (args.lr_schedule):
-                lr_scheduler.step()
+        if not fixed_params['multiprocessing_distributed'] or (fixed_params['multiprocessing_distributed'] and fixed_params['rank'] % ngpus_per_node == 0):
+            if is_best:
+                try:
+                    if cfg.get('save_model'):
+                        model_rounded = round_shift_weights(model, clone=True)
+                        torch.save(model_rounded.state_dict(), os.path.join(model_dir, "weights.pth"))
+                        torch.save(model_rounded, os.path.join(model_dir, "model.pth"))
+                except: 
+                    print("WARNING: Unable to save model.pth")
 
-            # evaluate on validation set
-            val_epoch_log = validate(val_loader, model, criterion, args)
-            acc1 = val_epoch_log[2]
-
-            # append to log
-            with open(os.path.join(model_dir, "train_log.csv"), "a") as train_log_file:
-                train_log_csv = csv.writer(train_log_file)
-                train_log_csv.writerow(((epoch,) + train_epoch_log + val_epoch_log)) 
-
-            # remember best acc@1 and save checkpoint
-            is_best = acc1 > best_acc1
-            best_acc1 = max(acc1, best_acc1)
-
-            if (args.print_weights):
-                with open(os.path.join(model_dir, 'weights_log_' + str(epoch) + '.txt'), 'w') as weights_log_file:
-                    with redirect_stdout(weights_log_file):
-                        # Log model's state_dict
-                        print("Model's state_dict:")
-                        # TODO: Use checkpoint above
-                        for param_tensor in model.state_dict():
-                            print(param_tensor, "\t", model.state_dict()[param_tensor].size())
-                            print(model.state_dict()[param_tensor])
-                            print("")
-
-
-            if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                    and args.rank % ngpus_per_node == 0):
-                if is_best:
-                    try:
-                        if (args.save_model):
-                            model_rounded = round_shift_weights(model, clone=True)
-
-                            torch.save(model_rounded.state_dict(), os.path.join(model_dir, "weights.pth"))
-                            torch.save(model_rounded, os.path.join(model_dir, "model.pth"))
-                    except: 
-                        print("WARNING: Unable to save model.pth")
-                
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'best_acc1': best_acc1,
-                    'optimizer' : optimizer.state_dict(),
-                    'lr_scheduler' : lr_scheduler,
-                }, is_best, model_dir)
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'arch': args.arch,
+                'state_dict': model.state_dict(),
+                'best_acc1': best_acc1,
+                'optimizer': optimizer.state_dict(),
+                # 'lr_scheduler': lr_scheduler,
+            }, is_best, model_dir)
 
     end_time = time.time()
-    print("Total Time:", end_time - start_time )
+    print("Total Time:", end_time - start_time)
 
-    if (args.print_weights):
-        if(model_rounded is None):
+    if fixed_params.get('print_weights', False):
+        if model_rounded is None:
             model_rounded = round_shift_weights(model, clone=True)
 
         with open(os.path.join(model_dir, 'weights_log.txt'), 'w') as weights_log_file:
             with redirect_stdout(weights_log_file):
                 # Log model's state_dict
                 print("Model's state_dict:")
-                # TODO: Use checkpoint above
                 for param_tensor in model_rounded.state_dict():
                     print(param_tensor, "\t", model_rounded.state_dict()[param_tensor].size())
                     print(model_rounded.state_dict()[param_tensor])
                     print("")
+    model = model.to(device)
+
+    return model, train_loader, val_loader, criterion, optimizer
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+
+def train(train_loader, model, criterion, optimizer, epoch, cfg, fixed_params):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -552,46 +521,47 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     progress = ProgressMeter(len(train_loader), batch_time, data_time, losses, top1,
                              prefix="Epoch: [{}]".format(epoch))
 
-    # switch to train mode
+    # Switch to train mode
     model.train()
 
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
-        # measure data loading time
+        # Measure data loading time
         data_time.update(time.time() - end)
 
-        if args.gpu is not None:
-            input = input.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+        if torch.cuda.is_available():
+            input = input.cuda(non_blocking=True)
+            target = target.cuda(non_blocking=True)
 
-        # compute output
+
+        # Compute output
         output = model(input)
         loss = criterion(output, target)
 
-        # measure accuracy and record loss
+        # Measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), input.size(0))
         top1.update(acc1[0], input.size(0))
         top5.update(acc5[0], input.size(0))
 
-        # compute gradient and do optimizer step
+        # Compute gradient and do optimizer step
         optimizer.zero_grad()
-        if(args.weight_decay > 0):
-            loss += shift_l2_norm(optimizer, args.weight_decay)
+        if cfg['weight_decay'] > 0:
+            loss += shift_l2_norm(optimizer, cfg['weight_decay'])
         loss.backward()
         optimizer.step()
 
-        # measure elapsed time
+        # Measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if i % args.print_freq == 0:
+        if i % fixed_params['print_freq'] == 0:
             progress.print(i)
     
     return (losses.avg, top1.avg.cpu().numpy(), batch_time.avg)
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, cfg, fixed_params):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -599,36 +569,35 @@ def validate(val_loader, model, criterion, args):
     progress = ProgressMeter(len(val_loader), batch_time, losses, top1,
                              prefix='Test: ')
 
-    # switch to evaluate mode
+    # Switch to evaluate mode
     model.eval()
 
     with torch.no_grad():
         end = time.time()
         for i, (input, target) in enumerate(val_loader):
-            if args.gpu is not None:
-                input = input.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
+            if torch.cuda.is_available():
+                input = input.cuda(non_blocking=True)
+                target = target.cuda(non_blocking=True)
 
-            # compute output
+
+            # Compute output
             output = model(input)
             loss = criterion(output, target)
 
-            # measure accuracy and record loss
+            # Measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
             losses.update(loss.item(), input.size(0))
             top1.update(acc1[0], input.size(0))
             top5.update(acc5[0], input.size(0))
 
-            # measure elapsed time
+            # Measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if i % args.print_freq == 0:
+            if i % fixed_params['print_freq'] == 0:
                 progress.print(i)
 
-        # TODO: this should also be done with the ProgressMeter
-        print(' * Acc@1 {top1.avg:.3f}'
-              .format(top1=top1))
+        print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
 
     return (losses.avg, top1.avg.cpu().numpy(), batch_time.avg)
 
@@ -685,6 +654,45 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+    
+def create_configspace():
+    cs = ConfigurationSpace()
+
+    model_type = Categorical("model_type", ["linear", "conv"])
+    batch_size = Integer("batch_size", (32, 128))
+    test_batch_size = Integer("test_batch_size", (500, 2000))
+    optimizer = Categorical("optimizer", ["SGD", "Adam"])
+    lr = Float("lr", (0.001, 0.1))
+    momentum = Float("momentum", (0.0, 0.9))
+    epochs = Integer("epochs", (5, 20))
+    weight_bits = Integer("weight_bits", (2, 8))
+    activation_integer_bits = Integer("activation_integer_bits", (2, 32))
+    activation_fraction_bits = Integer("activation_fraction_bits", (2, 32))
+    shift_depth = Integer("shift_depth", (0, 20))
+    shift_type = Categorical("shift_type", ["Q", "PS"])
+    # use_kernel = Categorical("use_kernel", ["False"])
+    rounding = Categorical("rounding", ["deterministic", "stochastic"])
+    weight_decay = Float("weight_decay", (1e-6, 1e-2))
+
+
+    cs.add_hyperparameters([model_type, batch_size, test_batch_size, optimizer,
+                            lr, momentum, epochs, weight_bits,
+                            activation_integer_bits, activation_fraction_bits, shift_depth, shift_type, #use_kernel
+                            rounding, weight_decay])
+    
+    desired_sums = [8, 16, 32]
+    
+    # Add constraints for each sum
+    for sum_val in desired_sums:
+        for int_bits in range(2, sum_val - 1):
+            frac_bits = sum_val - int_bits
+            # Adding forbidden clause where the sum is not equal to one of the desired sums
+            cs.add_forbidden_clause(ForbiddenAndConjunction(
+                ForbiddenEqualsClause(activation_integer_bits, int_bits),
+                ForbiddenEqualsClause(activation_fraction_bits, frac_bits)
+            ))
+
+    return cs
 
 
 def accuracy(output, target, topk=(1,)):
@@ -699,10 +707,173 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+    
+def plot_trajectory(facades: List[AbstractFacade]) -> None:
+    plt.figure()
+    plt.title("Optimization Trajectory")
+    plt.xlabel("Wallclock Time (s)")
+    plt.ylabel("Objective Value")
+
+    for facade in facades:
+        # Extract the trajectory information
+        traj = facade.solver.intensifier.traj_logger.trajectory
+        if not traj:
+            print("No trajectory data found for", type(facade).__name__)
+            continue
+
+        # Prepare the data for plotting
+        times = [entry["wallclock_time"] for entry in traj]
+        values = [entry["cost"] for entry in traj]
+
+        # Plot the trajectory
+        plt.plot(times, values, label=type(facade).__name__)
+
+    plt.legend()
+    plt.savefig("/scratch/hpc-prf-intexml/leonahennig/DeepShift/cifar10.png")
+    plt.show()
+
+# [Imports and definitions as in your previous script]
+
+# train_model function for SMAC optimization
+def train_model(config, seed: int = 0, budget: int = 25):
+    # Set up model configuration
+    model_config = {
+        'optimizer': config['optimizer'],
+        'lr': config['lr'],
+        'momentum': config['momentum'],
+        'weight_bits': config['weight_bits'],
+        'activation_integer_bits': config['activation_integer_bits'],
+        'activation_fraction_bits': config['activation_fraction_bits'],
+        'shift_depth': config['shift_depth'],
+        'shift_type': config['shift_type'],
+        'rounding': config['rounding'],
+        'weight_decay': config['weight_decay'],
+        'batch_size': config['batch_size'],
+        'test_batch_size': config['test_batch_size'],
+        'epochs': min(config['epochs'], int(budget)),
+    }
+
+    # Set up fixed parameters (update as necessary)
+    fixed_params = {
+        'log_interval': 10,
+        # Other fixed parameters...
+        # 'gpu': None,  # Assuming no specific GPU
+        'dist_url': 'env://',
+        'dist_backend': 'nccl',
+        'world_size': -1,
+        'multiprocessing_distributed': False,
+        'evaluate': False,
+        'use_kernel': False,
+        'save_model': False,
+        'pretrained': False,
+        'freeze': False,
+        'weights': '',
+        'workers': 4,
+        'resume': '',
+        'start_epoch': 0,
+        'print_freq': 50
+    }
+
+    fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
+
+    # Set device for training
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+
+    # Initialize model using the main_worker function with the new config
+    model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
+
+    # Train and evaluate the model using existing train and validate functions
+    best_acc1 = 0
+    for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
+        train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
+        val_log = validate(val_loader, model, criterion, model_config, fixed_params)
+        acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
+
+        # Update best accuracy
+        best_acc1 = max(acc1, best_acc1)
+
+    # Return best accuracy as the metric for SMAC
+    return best_acc1
 
 
-if __name__ == '__main__':
+def main():
+    cs = create_configspace()
+
+    facades: list[AbstractFacade] = []
+    scenario = Scenario(
+        cs,
+        trial_walltime_limit=3000,  # Set a suitable time limit for each trial
+        n_trials=50,  # Total number of configurations to try
+        min_budget=1,  # Minimum number of epochs for training
+        max_budget=25,  # Maximum number of epochs for training
+        n_workers=1,  # Number of parallel workers (set based on available resources)
+    )
+
+    # Create the intensifier object
+    intensifier_object = Hyperband
+    intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
+
+    # Initial design for random configurations
+    initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
+
+    # SMAC optimization facade setup
+    smac = MFFacade(
+        scenario,
+        train_model,  # The function to train and evaluate the model
+        initial_design=initial_design,
+        intensifier=intensifier,
+        overwrite=True,
+    )
+
+    # Optimize to find the best configuration
+    incumbent = smac.optimize()
+
+    # Evaluate the default configuration
+    default_cost = smac.validate(cs.get_default_configuration())
+    print(f"Default cost ({intensifier.__class__.__name__}): {default_cost}")
+
+    # Evaluate the best found configuration
+    incumbent_cost = smac.validate(incumbent)
+    print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
+
+    facades.append(smac)
+
+    # Print the best configuration and plot the optimization trajectory
+    print(incumbent, smac.validate)
+    plot_trajectory(facades)
+
+if __name__ == "__main__":
     main()
+
+
+
+
+# if __name__ == '__main__':
+#     cs = create_configspace()
+#     cfg = cs.sample_configuration()
+
+#     fixed_params = {
+#         'seed': random.randint(0, 2**32 - 1),
+#         'gpu': None,  # Assuming you want to keep it flexible; set to a specific GPU ID if needed
+#         'dist_url': 'tcp://224.66.41.62:23456',
+#         'dist_backend': 'nccl',
+#         'world_size': -1,
+#         'multiprocessing_distributed': False,
+#         'evaluate': False,  # Set this based on your specific needs
+#         'use_kernel': False,  # Set this based on your specific needs
+#         'save_model': False,
+#         'pretrained': False,
+#         'freeze': False,
+#         'weights': '',
+#         'workers': 4,
+#         'resume': '',  # Update with the actual path or set to None
+#         'evaluate': False,
+#         'start_epoch': 0,
+#         'print_freq': 50
+#         # Add any other fixed parameters here
+#     }
+    # main(cfg, fixed_params)
