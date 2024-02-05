@@ -51,7 +51,7 @@ from smac.facade import AbstractFacade
 from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float
 
 import cifar10_models as models
-
+from codecarbon import EmissionsTracker
 '''
 Unfortunately, none of the pytorch repositories with ResNets on CIFAR10 provides an 
 implementation as described in the original paper. If you just use the torchvision's 
@@ -79,6 +79,85 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
 best_acc1 = 0
 args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# def main(cfg, fixed_params):
+#     global best_acc1
+
+#     if not fixed_params['evaluate'] and fixed_params['use_kernel']:
+#         raise ValueError('Our custom kernel currently supports inference only, not training.')
+
+
+#     # Fixed parameter setup
+#     if fixed_params['seed'] is not None:
+#         random.seed(fixed_params['seed'])
+#         torch.manual_seed(fixed_params['seed'])
+#         cudnn.deterministic = True
+#         warnings.warn('You have chosen to seed training. '
+#                       'This will turn on the CUDNN deterministic setting, '
+#                       'which can slow down your training considerably! '
+#                       'You may see unexpected behavior when restarting '
+#                       'from checkpoints.')
+
+#     if fixed_params['gpu'] is not None:
+#         warnings.warn('You have chosen a specific GPU. This will completely '
+#                       'disable data parallelism.')
+
+#     if fixed_params['dist_url'] == "env://" and fixed_params['world_size'] == -1:
+#         fixed_params['world_size'] = int(os.environ["WORLD_SIZE"])
+
+#     fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
+
+#     ngpus_per_node = torch.cuda.device_count()
+#     if fixed_params['multiprocessing_distributed']:
+#         # Since we have ngpus_per_node processes per node, the total world_size
+#         # needs to be adjusted accordingly
+#         fixed_params['world_size'] = ngpus_per_node * fixed_params['world_size']
+#         # Use torch.multiprocessing.spawn to launch distributed processes: the
+#         # main_worker process function
+#         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, cfg, fixed_params))
+#     else:
+#         # Simply call main_worker function
+#         main_worker(fixed_params['gpu'], ngpus_per_node, cfg, fixed_params)
+
+#     cs = create_configspace()
+#     facades: list[AbstractFacade] = []
+#     scenario = Scenario(
+#             cs,
+#             trial_walltime_limit=3000,  # After 60 seconds, we stop the hyperparameter optimization
+#             n_trials=50,  # Evaluate max 500 different trials
+#             min_budget=1,  # Train the MLP using a hyperparameter configuration for at least 5 epochs
+#             max_budget=25,  # Train the MLP using a hyperparameter configuration for at most 25 epochs
+#             n_workers=1,
+#         )
+    
+#     # Create our intensifier
+#     intensifier_object = Hyperband
+#     intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
+    
+#     # We want to run five random configurations before starting the optimization.
+#     initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
+
+#     smac = MFFacade(
+#             scenario,
+#             train_model,
+#             initial_design=initial_design,
+#             intensifier=intensifier,
+#             overwrite=True,
+#         )
+#     incumbent = smac.optimize()
+
+#     # Get cost of default configuration
+#     default_cost = smac.validate(cs.get_default_configuration())
+#     print(f"Default cost ({intensifier.__class__.__name__}): {default_cost}")
+
+#     # Let's calculate the cost of the incumbent
+#     incumbent_cost = smac.validate(incumbent)
+#     print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
+
+#     facades.append(smac)
+    
+#     print(incumbent, smac.validate)
 
 
 def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
@@ -116,10 +195,11 @@ def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
             raise Exception("Unable to load model from " + cfg['model'])
 
         model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
-    elif fixed_params['pretrained']:  # If using a pretrained model
+    elif fixed_params['pretrained']:
         print("=> using pre-trained model '{}'".format(args.arch))
+        model = models.__dict__[args.arch]()
         model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
-    else:  # Creating a new model
+    else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
         model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
@@ -579,8 +659,6 @@ class ProgressMeter(object):
     
 def create_configspace():
     cs = ConfigurationSpace()
-
-    cs = ConfigurationSpace()
     desired_sums = [8, 16, 32]
 
     batch_size = Integer("batch_size", (32, 512), default = 128)
@@ -588,7 +666,7 @@ def create_configspace():
     optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelte", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
     lr = Float("lr", (0.001, 0.2), default = 0.1)
     momentum = Float("momentum", (0.0, 0.9), default=0.9)
-    epochs = Integer("epochs", (10, 150), default = 100)
+    epochs = Integer("epochs", (40, 150), default = 80)
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
@@ -598,7 +676,6 @@ def create_configspace():
     rounding = Categorical("rounding", ["deterministic", "stochastic"], default = "deterministic")
     weight_decay = Float("weight_decay", (1e-6, 1e-2), default = 1e-4)
     # sum_bits = Integer("sum_bits", lower=min(desired_sums), upper=max(desired_sums))
-
 
 
     cs.add_hyperparameters([batch_size, test_batch_size, optimizer,
@@ -673,14 +750,20 @@ def plot_pareto(smac: AbstractFacade, incumbents: List[Configuration]) -> None:
     plt.clf()
 
 # train_model function for SMAC optimization
-def train_model(config, seed, budget: int = 25):
+def train_model(config, seed: int = 0, budget: int = 25):
     # Set seeds for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    start_time = time.time()
+    # start_time = time.time()
+
+    # Initialize the emissions tracker
+    tracker = EmissionsTracker()
+
+    # Start tracking
+    # tracker.start()
     # Set up model configuration
     model_config = {
         'optimizer': config['optimizer'],
@@ -695,7 +778,7 @@ def train_model(config, seed, budget: int = 25):
         'weight_decay': config['weight_decay'],
         'batch_size': config['batch_size'],
         'test_batch_size': config['test_batch_size'],
-        'epochs': min(config['epochs'], int(budget)),
+        'epochs': int(budget),
     }
 
     # Set up fixed parameters (update as necessary)
@@ -710,7 +793,7 @@ def train_model(config, seed, budget: int = 25):
         'evaluate': False,
         'use_kernel': False,
         'save_model': False,
-        'pretrained': False,
+        'pretrained': True,
         'freeze': False,
         'weights': '',
         'workers': 4,
@@ -725,80 +808,92 @@ def train_model(config, seed, budget: int = 25):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
 
-    # Initialize model using the main_worker function with the new config
-    model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
+    with EmissionsTracker(tracking_mode='process', log_level='critical') as tracker:
+        # Initialize model using the main_worker function with the new config
+        model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
 
-    # Train and evaluate the model using existing train and validate functions
-    best_acc1 = 0
-    for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
-        train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
-        val_log = validate(val_loader, model, criterion, model_config, fixed_params)
-        acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
+        # Train and evaluate the model using existing train and validate functions
+        best_acc1 = 0
+        for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
+            train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
+            val_log = validate(val_loader, model, criterion, model_config, fixed_params)
+            acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
 
-        # Update best accuracy
-        best_acc1 = max(acc1, best_acc1)
+            # Update best accuracy
+            best_acc1 = max(acc1, best_acc1)
+
+        # emissions = tracker.stop()
+            
+    	
+    train_energy = tracker.final_emissions_data.energy_consumed
+    train_emissions = tracker.final_emissions
+
+    return {
+        "accuracy": 1 - best_acc1,  # Assuming best_acc1 is your accuracy metric
+        "emissions": train_energy,  # Emissions measured
+    }
+    
 
     # Return best accuracy as the metric for SMAC
-    return {
-            "accuracy": 1 - best_acc1,
-            "time": time.time() - start_time,
-        }
+    # return {
+    #         "accuracy": best_acc1,
+    #         "time": time.time() - start_time,
+    #     }
 
 
 
 def main():
     cs = create_configspace()
-    objectives = ["accuracy", "time"]
+    # objectives = ["accuracy", "time"]
+    objectives = ["accuracy", "emissions"]
     facades: list[AbstractFacade] = []
-    for seed in [1, 2, 3, 4, 5]:
-        print(f"Running optimization with seed: {seed}")
-        scenario = Scenario(
-            cs,
-            objectives = objectives,
-            trial_walltime_limit=3000,  # Set a suitable time limit for each trial
-            n_trials=50,  # Total number of configurations to try
-            min_budget=1,  # Minimum number of epochs for training
-            max_budget=25,  # Maximum number of epochs for training
-            n_workers=1,  # Number of parallel workers (set based on available resources)
-            use_default_config = True
-        )
+    scenario = Scenario(
+        cs,
+        objectives = objectives,
+        trial_walltime_limit=2000,  # Set a suitable time limit for each trial
+        n_trials=400,  # Total number of configurations to try
+        min_budget=40,  # Minimum number of epochs for training
+        max_budget=150,  # Maximum number of epochs for training
+        n_workers=1,  # Number of parallel workers (set based on available resources)
+        use_default_config = True
+    )
 
-        # Create the intensifier object
-        intensifier_object = Hyperband
-        intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
+    # Create the intensifier object
+    intensifier_object = Hyperband
+    intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
 
-        # Initial design for random configurations
-        initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
+    # Initial design for random configurations
+    initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
 
-        multi_objective_algorithm = ParEGO(scenario)
+    multi_objective_algorithm = ParEGO(scenario)
 
-        seeds = [1, 2, 3, 4, 5]
-        for seed in seeds:
-            smac = MFFacade(
-                scenario,
-                lambda cfg: train_model(cfg, seed=seed, budget=25),  # Pass the seed here
-                initial_design=initial_design,
-                intensifier=intensifier,
-                overwrite=True,
-                )   
+    # Run the optimization with different seeds
+    smac = MFFacade(
+        scenario,
+        train_model,  # Pass the seed here
+        initial_design=initial_design,
+        multi_objective_algorithm=multi_objective_algorithm,
+        intensifier=intensifier,
+        overwrite=True,
+    )
 
-            # Optimize to find the best configuration
-            incumbents = smac.optimize()
+    # Optimize to find the best configuration
+    incumbents = smac.optimize()
 
-            # Get cost of default configuration
-            default_cost = smac.validate(cs.get_default_configuration())
-            print(f"Validated costs from default config: \n--- {default_cost}\n")
+    # Get cost of default configuration
+    default_cost = smac.validate(cs.get_default_configuration())
+    print(f"Validated costs from default config: \n--- {default_cost}\n")
 
-            # Let's calculate the cost of the incumbent
-            print("Validated costs from the Pareto front (incumbents):")
-            for incumbent in incumbents:
-                cost = smac.validate(incumbent)
-                print("---", cost)
+    # Let's calculate the cost of the incumbent
+    print("Validated costs from the Pareto front (incumbents):")
+    for incumbent in incumbents:
+        cost = smac.validate(incumbent)
+        print("---", cost)
 
-            # Let's plot a pareto front
-            plot_pareto(smac, incumbents)
+    # Let's plot a pareto front
+    plot_pareto(smac, incumbents)
 
-            print(incumbents)
+    print(incumbents)
 
 if __name__ == "__main__":
     main()

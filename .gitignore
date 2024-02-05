@@ -1,3 +1,10 @@
 __pycache__/
 smac3_output/
 data/MNIST/
+*.out 
+*.bak
+*.png
+emissions.csv
+models/cifar10/
+pytorch/models/cifar10/
+pytorch/deepshift/kernels/

@@ -187,7 +187,7 @@ def create_configspace():
 
     return cs
 
-def train_model(config, seed: int = 0, budget: int = 25):
+def train_model(config, seed: int = 0, budget: int = 100):
     start_time = time.time()
 
     model_config = {
