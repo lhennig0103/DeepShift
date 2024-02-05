@@ -4,3 +4,5 @@ Pillow
 termcolor
 torch
 torchvision
+smac
+matplotlib

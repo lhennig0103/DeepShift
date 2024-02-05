@@ -1,5 +1,6 @@
 from __future__ import print_function
 import warnings
+import time
 import argparse
 import torch
 import torch.nn as nn
@@ -15,10 +16,17 @@ from smac import HyperparameterOptimizationFacade, Scenario
 from smac.intensifier import Hyperband
 from smac.facade import MultiFidelityFacade as MFFacade
 from smac.facade import AbstractFacade
-from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float
+from ConfigSpace import ConfigurationSpace, Configuration, Categorical, Integer, Float
 import multiprocessing as mp
 import matplotlib.pyplot as plt
+import numpy as np
 from typing import List
+from smac.multi_objective.parego import ParEGO
+from py_experimenter.experimenter import PyExperimenter
+
+from functools import partial
+import os
+from py_experimenter.result_processor import ResultProcessor
 
 if mp.get_start_method(allow_none=True) != 'spawn':
     mp.set_start_method('spawn')
@@ -63,12 +71,13 @@ class ConvMNIST(nn.Module):
     
 
 class DSNN:
-    def __init__(self, model_config, device):
+    def __init__(self, model_config, device, result_processor):
         self.model_config = model_config
         self.device = device
         self.model = self._initialize_model()
         self.optimizer = self._initialize_optimizer()
         self.loss_fn = F.cross_entropy
+        self.result_processor = result_processor
 
     
     def _initialize_model(self):
@@ -110,12 +119,12 @@ class DSNN:
     def train(self, train_config):
         # Training configuration setup
         train_loader = torch.utils.data.DataLoader(
-            datasets.MNIST('data', train=True, download=False,
+            datasets.MNIST('data', train=True, download=True,
                            transform=transforms.Compose([
                                transforms.ToTensor(),
                                transforms.Normalize((0.1307,), (0.3081,))
                            ])),
-            batch_size=train_config['batch_size'], shuffle=False)
+            batch_size=train_config['batch_size'], shuffle=True)
 
         test_loader = torch.utils.data.DataLoader(
             datasets.MNIST('data', train=False, transform=transforms.Compose([
@@ -142,6 +151,7 @@ class DSNN:
         return test_loss
 
     def test(self, model, device, test_loader):
+        
         model.eval()
         test_loss = 0
         correct = 0
@@ -155,6 +165,7 @@ class DSNN:
 
         test_loss /= len(test_loader.dataset)
         test_accuracy = 100. * correct / len(test_loader.dataset)
+        self.result_processor.process_logs({"logEpochs": {"test_accuracy": test_accuracy}})
         print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({test_accuracy:.0f}%)')
         return test_loss, test_accuracy
     
@@ -179,12 +190,14 @@ def create_configspace():
 
     cs.add_hyperparameters([model_type, batch_size, test_batch_size, optimizer_type,
                             learning_rate, momentum, num_epochs, weight_bits,
-                            activation_integer_bits, activation_fraction_bits, shift_depth, shift_type, #use_kernel
-                            rounding])
+                            activation_integer_bits, activation_fraction_bits, shift_depth,
+                            shift_type, rounding])
 
     return cs
 
-def train_model(config, seed: int = 0, budget: int = 25):
+def train_model(config, seed:int, budget:int, result_processor):
+    start_time = time.time()
+
     model_config = {
         'type': config['model_type'],
         'optimizer': config['optimizer_type'],
@@ -202,7 +215,7 @@ def train_model(config, seed: int = 0, budget: int = 25):
     train_config = {
         'batch_size': config['batch_size'],
         'test_batch_size': config['test_batch_size'],
-        'num_epochs': min(config['num_epochs'], int(budget)),  # Use budget to limit epochs
+        'num_epochs': int(budget),  # Use budget to limit epochs
         'log_interval': 10  # You can adjust this as needed
     }
 
@@ -210,10 +223,13 @@ def train_model(config, seed: int = 0, budget: int = 25):
     
     torch.manual_seed(seed)  # Set the random seed for reproducibility
     
-    dsnn = DSNN(model_config, device)
+    dsnn = DSNN(model_config, device, result_processor)
     loss = dsnn.train(train_config)
 
-    return loss
+    return {
+            "loss": loss,
+            "time": time.time() - start_time,
+        }
 
 
 def plot_trajectory(facades: List[AbstractFacade]) -> None:
@@ -243,12 +259,50 @@ def plot_trajectory(facades: List[AbstractFacade]) -> None:
     plt.legend()
     plt.show()
 
-def main():
-    
+def plot_pareto(smac: AbstractFacade, incumbents: List[Configuration]) -> None:
+    """Plots configurations from SMAC and highlights the best configurations in a Pareto front."""
+    average_costs = []
+    average_pareto_costs = []
+    for config in smac.runhistory.get_configs():
+        # Since we use multiple seeds, we have to average them to get only one cost value pair for each configuration
+        average_cost = smac.runhistory.average_cost(config)
+
+        if config in incumbents:
+            average_pareto_costs += [average_cost]
+        else:
+            average_costs += [average_cost]
+
+    # Let's work with a numpy array
+    costs = np.vstack(average_costs)
+    pareto_costs = np.vstack(average_pareto_costs)
+    pareto_costs = pareto_costs[pareto_costs[:, 0].argsort()]  # Sort them
+
+    costs_x, costs_y = costs[:, 0], costs[:, 1]
+    pareto_costs_x, pareto_costs_y = pareto_costs[:, 0], pareto_costs[:, 1]
+
+    plt.scatter(costs_x, costs_y, marker="x", label="Configuration")
+    plt.scatter(pareto_costs_x, pareto_costs_y, marker="x", c="r", label="Incumbent")
+    plt.step(
+        [pareto_costs_x[0]] + pareto_costs_x.tolist() + [np.max(costs_x)],  # We add bounds
+        [np.max(costs_y)] + pareto_costs_y.tolist() + [np.min(pareto_costs_y)],  # We add bounds
+        where="post",
+        linestyle=":",
+    )
+
+    plt.title("Pareto-Front")
+    plt.xlabel(smac.scenario.objectives[0])
+    plt.ylabel(smac.scenario.objectives[1])
+    plt.legend()
+    plt.show()
+
+def main_dsnn(keyfields: dict, result_processor: ResultProcessor, custom_fields: dict):
+
+    objectives = ["loss"]
     cs = create_configspace()
     facades: list[AbstractFacade] = []
     scenario = Scenario(
             cs,
+            objectives=objectives,
             trial_walltime_limit=3000,  # After 60 seconds, we stop the hyperparameter optimization
             n_trials=50,  # Evaluate max 500 different trials
             min_budget=1,  # Train the MLP using a hyperparameter configuration for at least 5 epochs
@@ -263,27 +317,41 @@ def main():
     # We want to run five random configurations before starting the optimization.
     initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
 
+    multi_objective_algorithm = ParEGO(scenario)
+    train_budgeted_model = partial(train_model, seed = keyfields["seed"], result_processor = result_processor)
+
     smac = MFFacade(
             scenario,
-            train_model,
+            train_budgeted_model,
             initial_design=initial_design,
+            # multi_objective_algorithm=multi_objective_algorithm,
             intensifier=intensifier,
             overwrite=True,
         )
     incumbent = smac.optimize()
-
-    # Get cost of default configuration
-    default_cost = smac.validate(cs.get_default_configuration())
-    print(f"Default cost ({intensifier.__class__.__name__}): {default_cost}")
-
-    # Let's calculate the cost of the incumbent
     incumbent_cost = smac.validate(incumbent)
-    print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
-
-    facades.append(smac)
     
-    print(incumbent, smac.validate)
-    plot_trajectory(facades)
+    result_processor.process_results({'config': incumbent, 'incumbent_cost': incumbent_cost})
+
+
+
+    # # Get cost of default configuration
+    # default_cost = smac.validate(cs.get_default_configuration())
+    # print(f"Validated costs from default config: \n--- {default_cost}\n")
+
+    # # Let's calculate the cost of the incumbent
+    # print("Validated costs from the Pareto front (incumbents):")
+    # # for incumbent in incumbents:
+    # #     cost = smac.validate(incumbent)
+    # #     print("---", cost)
+
+    # # Let's plot a pareto front
+    # # plot_pareto(smac, incumbent)
+
+def main():
+    experimenter = PyExperimenter(experiment_configuration_file_path = "./config/experiment_configuration.cfg", use_codecarbon = False) #TODO experimenter name job id
+    experimenter.fill_table_from_config()
+    experimenter.execute(main_dsnn, max_experiments=1)
 
 if __name__ == "__main__":
     main()

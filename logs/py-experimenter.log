@@ -1,0 +1,12 @@
+2024-01-23 17:23:29,593  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:23:29,609  | py-experimenter - INFO     | 5 rows successfully added to database. 0 rows were skipped.
+2024-01-23 17:24:22,788  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:24:22,789  | py-experimenter - INFO     | No rows to add. All the 5 experiments already exist.
+2024-01-23 17:27:37,530  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:27:37,531  | py-experimenter - INFO     | No rows to add. All the 5 experiments already exist.
+2024-01-23 17:33:45,642  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:33:45,643  | py-experimenter - INFO     | No rows to add. All the 5 experiments already exist.
+2024-01-23 17:39:47,647  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:39:47,648  | py-experimenter - INFO     | No rows to add. All the 5 experiments already exist.
+2024-01-23 17:40:20,671  | py-experimenter - INFO     | Initialized and connected to database
+2024-01-23 17:40:20,672  | py-experimenter - INFO     | No rows to add. All the 5 experiments already exist.
