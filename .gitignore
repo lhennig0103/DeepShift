@@ -8,3 +8,5 @@ emissions.csv
 models/cifar10/
 pytorch/models/cifar10/
 pytorch/deepshift/kernels/
+data/
+smac3_output.zip

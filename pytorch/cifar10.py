@@ -12,6 +12,9 @@ from contextlib import redirect_stdout
 from collections import OrderedDict
 import copy
 
+import datetime
+
+
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -593,7 +596,7 @@ def create_configspace():
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
-    shift_depth = Integer("shift_depth", (0, 20), default = 20)
+    shift_depth = Integer("shift_depth", (1, 20), default = 20)
     shift_type = Categorical("shift_type", ["Q", "PS"], default = "PS")
     # use_kernel = Categorical("use_kernel", ["False"])
     rounding = Categorical("rounding", ["deterministic", "stochastic"], default = "deterministic")
@@ -646,77 +649,77 @@ def plot_trajectory():
 
 # [Imports and definitions as in your previous script]
 
-# train_model function for SMAC optimization
 def train_model(config, seed: int = 4, budget: int = 25):
-    # Set up model configuration
+    try:
+        # Set up model configuration
+        np.random.seed(seed=seed)
+            
+        model_config = {
+            'optimizer': config['optimizer'],
+            'lr': config['lr'],
+            'momentum': config['momentum'],
+            'weight_bits': config['weight_bits'],
+            'activation_integer_bits': config['activation_integer_bits'],
+            'activation_fraction_bits': config['activation_fraction_bits'],
+            'shift_depth': config['shift_depth'],
+            'shift_type': config['shift_type'],
+            'rounding': config['rounding'],
+            'weight_decay': config['weight_decay'],
+            'batch_size': config['batch_size'],
+            'test_batch_size': config['test_batch_size'],
+            'epochs': int(budget)
+        }
 
-    np.random.seed(seed=seed)
-        
-    model_config = {
-        'optimizer': config['optimizer'],
-        'lr': config['lr'],
-        'momentum': config['momentum'],
-        'weight_bits': config['weight_bits'],
-        'activation_integer_bits': config['activation_integer_bits'],
-        'activation_fraction_bits': config['activation_fraction_bits'],
-        'shift_depth': config['shift_depth'],
-        'shift_type': int(budget),
-        'rounding': config['rounding'],
-        'weight_decay': config['weight_decay'],
-        'batch_size': config['batch_size'],
-        'test_batch_size': config['test_batch_size'],
-        'epochs': config['epochs']
-    }
+        # Set up fixed parameters (update as necessary)
+        fixed_params = {
+            'log_interval': 10,
+            # Other fixed parameters...
+            'dist_url': 'env://',
+            'dist_backend': 'nccl',
+            'world_size': -1,
+            'multiprocessing_distributed': False,
+            'evaluate': False,
+            'use_kernel': False,
+            'save_model': False,
+            'pretrained': True,
+            'freeze': False,
+            'weights': '',
+            'workers': 4,
+            'resume': '',
+            'start_epoch': 0,
+            'print_freq': 50
+        }
+        fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
 
-    # Set up fixed parameters (update as necessary)
-    fixed_params = {
-        'log_interval': 10,
-        # Other fixed parameters...
-        # 'gpu': None,  # Assuming no specific GPU
-        'dist_url': 'env://',
-        'dist_backend': 'nccl',
-        'world_size': -1,
-        'multiprocessing_distributed': False,
-        'evaluate': False,
-        'use_kernel': False,
-        'save_model': False,
-        'pretrained': True,
-        'freeze': False,
-        'weights': '',
-        'workers': 4,
-        'resume': '',
-        'start_epoch': 0,
-        'print_freq': 50
-    }
+        # Set device for training
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(seed)
 
-    fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
+        # Initialize model using the main_worker function with the new config
+        model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
 
-    # Set device for training
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
+        # Train and evaluate the model
+        best_acc1 = 0
+        for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
+            train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
+            val_log = validate(val_loader, model, criterion, model_config, fixed_params)
+            acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
 
-    # Initialize model using the main_worker function with the new config
-    model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
+            # Update best accuracy
+            best_acc1 = max(acc1, best_acc1)
 
-    # Train and evaluate the model using existing train and validate functions
-    best_acc1 = 0
-    for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
-        train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
-        val_log = validate(val_loader, model, criterion, model_config, fixed_params)
-        acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
+        # Check if the accuracy is a finite number
+        if not np.isfinite(acc1):
+            raise ValueError("Non-finite accuracy detected.")
 
-        # Log the configuration and its performance
-        optimization_log.append({'config': config, 'performance': 1 - best_acc1, 'time': time.time()})
-    
-        # Update best accuracy
-        best_acc1 = max(acc1, best_acc1)
+        # Return best accuracy as the metric for SMAC
+        return 1 - best_acc1
 
-    # Check if the accuracy is a finite number
-    if not np.isfinite(acc1):
-        return float('inf')  # Return a high cost in case of non-finite value
+    except Exception as e:
+        print(f"An error occurred during model training or evaluation: {e}")
+        # Optionally, log the error details to a file or external logging system here
 
-    # Return best accuracy as the metric for SMAC
-    return 1 - best_acc1
+        # Return a
 
 
 def main():
@@ -775,14 +778,21 @@ def main():
 
     # train_budgeted_model = partial(train_model, budget=10, seed=1234)
 
+    # Get the current date and time
+    current_datetime = datetime.datetime.now()
+
+    # Format the date and time as a string
+    timestamp = current_datetime.strftime("%Y%m%d%H%M%S")
+
     scenario = Scenario(
         cs,
         trial_walltime_limit=2000,  # Set a suitable time limit for each trial
-        n_trials=400,  # Total number of configurations to try
-        min_budget=40,  # Minimum number of epochs for training
+        n_trials=200,  # Total number of configurations to try
+        min_budget=30,  # Minimum number of epochs for training
         max_budget=150,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
-        use_default_config = True
+        use_default_config = True,
+        name=f'cifar10_mf_epochs{timestamp}'
     )
 
     # Create the intensifier object

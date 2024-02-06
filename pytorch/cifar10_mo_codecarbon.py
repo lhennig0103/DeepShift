@@ -11,6 +11,7 @@ import distutils.util
 from contextlib import redirect_stdout
 from collections import OrderedDict
 import copy
+import datetime
 
 import torch
 import torch.nn as nn
@@ -670,7 +671,7 @@ def create_configspace():
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
-    shift_depth = Integer("shift_depth", (0, 1000), default = 10)
+    shift_depth = Integer("shift_depth", (0, 20), default = 20)
     shift_type = Categorical("shift_type", ["Q", "PS"], default = "PS")
     # use_kernel = Categorical("use_kernel", ["False"])
     rounding = Categorical("rounding", ["deterministic", "stochastic"], default = "deterministic")
@@ -750,7 +751,7 @@ def plot_pareto(smac: AbstractFacade, incumbents: List[Configuration]) -> None:
     plt.clf()
 
 # train_model function for SMAC optimization
-def train_model(config, seed: int = 0, budget: int = 25):
+def train_model(config, seed: int = 4, budget: int = 25):
     # Set seeds for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -847,15 +848,23 @@ def main():
     # objectives = ["accuracy", "time"]
     objectives = ["accuracy", "emissions"]
     facades: list[AbstractFacade] = []
+
+    # Get the current date and time
+    current_datetime = datetime.datetime.now()
+
+    # Format the date and time as a string
+    timestamp = current_datetime.strftime("%Y%m%d%H%M%S")
+
     scenario = Scenario(
         cs,
         objectives = objectives,
         trial_walltime_limit=2000,  # Set a suitable time limit for each trial
-        n_trials=400,  # Total number of configurations to try
+        n_trials=200,  # Total number of configurations to try
         min_budget=40,  # Minimum number of epochs for training
         max_budget=150,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
-        use_default_config = True
+        use_default_config = True,
+        name=f'MO-codecarbon{timestamp}'
     )
 
     # Create the intensifier object
