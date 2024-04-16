@@ -12,6 +12,9 @@ from contextlib import redirect_stdout
 from collections import OrderedDict
 import copy
 
+import datetime
+
+
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -41,12 +44,15 @@ import unoptimized
 import matplotlib.pyplot as plt
 from typing import List
 import multiprocessing as mp
+import numpy as np
 
 from smac import HyperparameterOptimizationFacade, Scenario
 from smac.intensifier import Hyperband
 from smac.facade import MultiFidelityFacade as MFFacade
 from smac.facade import AbstractFacade
-from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float, ForbiddenAndConjunction, ForbiddenEqualsClause
+from ConfigSpace import ConfigurationSpace, Categorical, Integer, Float, InCondition
+
+from functools import partial
 
 import cifar10_models as models
 
@@ -78,85 +84,8 @@ best_acc1 = 0
 args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-def main(cfg, fixed_params):
-    global best_acc1
-
-    if not fixed_params['evaluate'] and fixed_params['use_kernel']:
-        raise ValueError('Our custom kernel currently supports inference only, not training.')
-
-
-    # Fixed parameter setup
-    if fixed_params['seed'] is not None:
-        random.seed(fixed_params['seed'])
-        torch.manual_seed(fixed_params['seed'])
-        cudnn.deterministic = True
-        warnings.warn('You have chosen to seed training. '
-                      'This will turn on the CUDNN deterministic setting, '
-                      'which can slow down your training considerably! '
-                      'You may see unexpected behavior when restarting '
-                      'from checkpoints.')
-
-    if fixed_params['gpu'] is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
-
-    if fixed_params['dist_url'] == "env://" and fixed_params['world_size'] == -1:
-        fixed_params['world_size'] = int(os.environ["WORLD_SIZE"])
-
-    fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
-
-    ngpus_per_node = torch.cuda.device_count()
-    if fixed_params['multiprocessing_distributed']:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        fixed_params['world_size'] = ngpus_per_node * fixed_params['world_size']
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, cfg, fixed_params))
-    else:
-        # Simply call main_worker function
-        main_worker(fixed_params['gpu'], ngpus_per_node, cfg, fixed_params)
-
-    cs = create_configspace()
-    facades: list[AbstractFacade] = []
-    scenario = Scenario(
-            cs,
-            trial_walltime_limit=3000,  # After 60 seconds, we stop the hyperparameter optimization
-            n_trials=50,  # Evaluate max 500 different trials
-            min_budget=1,  # Train the MLP using a hyperparameter configuration for at least 5 epochs
-            max_budget=25,  # Train the MLP using a hyperparameter configuration for at most 25 epochs
-            n_workers=1,
-        )
-    
-    # Create our intensifier
-    intensifier_object = Hyperband
-    intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
-    
-    # We want to run five random configurations before starting the optimization.
-    initial_design = MFFacade.get_initial_design(scenario, n_configs=5)
-
-    smac = MFFacade(
-            scenario,
-            train_model,
-            initial_design=initial_design,
-            intensifier=intensifier,
-            overwrite=True,
-        )
-    incumbent = smac.optimize()
-
-    # Get cost of default configuration
-    default_cost = smac.validate(cs.get_default_configuration())
-    print(f"Default cost ({intensifier.__class__.__name__}): {default_cost}")
-
-    # Let's calculate the cost of the incumbent
-    incumbent_cost = smac.validate(incumbent)
-    print(f"Incumbent cost ({intensifier.__class__.__name__}): {incumbent_cost}")
-
-    facades.append(smac)
-    
-    print(incumbent, smac.validate)
-    plot_trajectory(facades)
+# Global variable for logging
+optimization_log = []
 
 
 def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
@@ -193,17 +122,6 @@ def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
         model = model.cuda(gpu) if gpu is not None else torch.nn.DataParallel(model).cuda()
-
-    if gpu is not None:
-        torch.cuda.set_device(gpu)
-        model = model.cuda(gpu)
-
-        # Ensure that all tensors are moved to the specified device
-        criterion = criterion.cuda(gpu)
-    else:
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        model = torch.nn.DataParallel(model).cuda()
-        criterion = criterion.cuda()
 
 
 
@@ -517,7 +435,15 @@ def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
                     print(param_tensor, "\t", model_rounded.state_dict()[param_tensor].size())
                     print(model_rounded.state_dict()[param_tensor])
                     print("")
+
     model = model.to(device)
+
+    if torch.cuda.is_available() and fixed_params.get('multiprocessing_distributed', False):
+        # For multiprocessing distributed training, DistributedDataParallel constructor
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    elif torch.cuda.is_available():
+        # DataParallel will divide and allocate batch_size to all available GPUs
+        model = torch.nn.DataParallel(model).cuda(gpu)
 
     return model, train_loader, val_loader, criterion, optimizer
 
@@ -537,12 +463,11 @@ def train(train_loader, model, criterion, optimizer, epoch, cfg, fixed_params):
 
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
-        if gpu is not None:
-            input = input.cuda(gpu, non_blocking=True)
-            target = target.cuda(gpu, non_blocking=True)
-        else:
-            input = input.cuda(non_blocking=True)
-            target = target.cuda(non_blocking=True)
+        input, target = input.to(device), target.to(device)  # Move data to the correct device
+        
+        # Compute output
+        output = model(input)
+        loss = criterion(output, target)
 
 
         # Compute output
@@ -586,12 +511,11 @@ def validate(val_loader, model, criterion, cfg, fixed_params):
     with torch.no_grad():
         end = time.time()
         for i, (input, target) in enumerate(val_loader):
-            if gpu is not None:
-                input = input.cuda(gpu, non_blocking=True)
-                target = target.cuda(gpu, non_blocking=True)
-            else:
-                input = input.cuda(non_blocking=True)
-                target = target.cuda(non_blocking=True)
+            input, target = input.to(device), target.to(device)  # Move data to the correct device
+            
+            # Compute output
+            output = model(input)
+            loss = criterion(output, target)
 
 
             # Compute output
@@ -671,40 +595,35 @@ class ProgressMeter(object):
     
 def create_configspace():
     cs = ConfigurationSpace()
-
-    model_type = Categorical("model_type", ["linear", "conv"])
-    batch_size = Integer("batch_size", (32, 128))
-    test_batch_size = Integer("test_batch_size", (500, 2000))
-    optimizer = Categorical("optimizer", ["SGD", "Adam"])
-    lr = Float("lr", (0.001, 0.1))
-    momentum = Float("momentum", (0.0, 0.9))
-    epochs = Integer("epochs", (40,110))
-    weight_bits = Integer("weight_bits", (2, 8))
-    activation_integer_bits = Integer("activation_integer_bits", (2, 32))
-    activation_fraction_bits = Integer("activation_fraction_bits", (2, 32))
-    shift_depth = Integer("shift_depth", (0, 20))
-    shift_type = Categorical("shift_type", ["Q", "PS"])
+    desired_sums = [8, 16, 32]
+    batch_size = Integer("batch_size", (32, 512), default = 64)
+    test_batch_size = Integer("test_batch_size", (500, 1000), default = 750)
+    optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelta", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
+    lr = Float("lr", (0.001, 0.2), default = 0.1)
+    momentum = Float("momentum", (0.0, 0.9), default=0.9)
+    epochs = Integer("epochs", (5,100), default = 15)
+    weight_bits = Integer("weight_bits", (2, 8), default = 5)
+    activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
+    activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
+    shift_depth = Integer("shift_depth", (1, 20), default = 20)
+    shift_type = Categorical("shift_type", ["Q", "PS"], default = "PS")
     # use_kernel = Categorical("use_kernel", ["False"])
-    rounding = Categorical("rounding", ["deterministic", "stochastic"])
-    weight_decay = Float("weight_decay", (1e-6, 1e-2))
+    rounding = Categorical("rounding", ["deterministic", "stochastic"], default = "deterministic")
+    weight_decay = Float("weight_decay", (1e-6, 1e-2), default = 1e-4)
+    # sum_bits = Integer("sum_bits", (desired_sums, desired_sums))
 
 
-    cs.add_hyperparameters([model_type, batch_size, test_batch_size, optimizer,
+
+    cs.add_hyperparameters([batch_size, test_batch_size, optimizer,
                             lr, momentum, epochs, weight_bits,
                             activation_integer_bits, activation_fraction_bits, shift_depth, shift_type, #use_kernel
                             rounding, weight_decay])
     
-    desired_sums = [8, 16, 32]
-    
-    # Add constraints for each sum
-    for sum_val in desired_sums:
-        for int_bits in range(2, sum_val - 1):
-            frac_bits = sum_val - int_bits
-            # Adding forbidden clause where the sum is not equal to one of the desired sums
-            cs.add_forbidden_clause(ForbiddenAndConjunction(
-                ForbiddenEqualsClause(activation_integer_bits, int_bits),
-                ForbiddenEqualsClause(activation_fraction_bits, frac_bits)
-            ))
+    # # Define InCondition for sum_bits
+    # sum_condition = InCondition(child=sum_bits, parent=activation_integer_bits, values=desired_sums)
+
+    # # Add condition to Configuration Space
+    # cs.add_condition(sum_condition)
 
     return cs
 
@@ -725,111 +644,110 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
     
-def plot_trajectory(facades: List[AbstractFacade]) -> None:
+def plot_trajectory():
+    times = [entry['time'] for entry in optimization_log]
+    values = [entry['performance'] for entry in optimization_log]
+
     plt.figure()
     plt.title("Optimization Trajectory")
     plt.xlabel("Wallclock Time (s)")
     plt.ylabel("Objective Value")
-
-    for facade in facades:
-        # Extract the trajectory information
-        traj = facade.solver.intensifier.traj_logger.trajectory
-        if not traj:
-            print("No trajectory data found for", type(facade).__name__)
-            continue
-
-        # Prepare the data for plotting
-        times = [entry["wallclock_time"] for entry in traj]
-        values = [entry["cost"] for entry in traj]
-
-        # Plot the trajectory
-        plt.plot(times, values, label=type(facade).__name__)
-
+    plt.plot(times, values, label='Trajectory')
     plt.legend()
     plt.savefig("/scratch/hpc-prf-intexml/leonahennig/DeepShift/cifar10.png")
-    plt.show()
 
 # [Imports and definitions as in your previous script]
 
-# train_model function for SMAC optimization
-def train_model(config, seed: int = 0, budget: int = 25):
-    # Set up model configuration
-    model_config = {
-        'optimizer': config['optimizer'],
-        'lr': config['lr'],
-        'momentum': config['momentum'],
-        'weight_bits': config['weight_bits'],
-        'activation_integer_bits': config['activation_integer_bits'],
-        'activation_fraction_bits': config['activation_fraction_bits'],
-        'shift_depth': config['shift_depth'],
-        'shift_type': config['shift_type'],
-        'rounding': config['rounding'],
-        'weight_decay': config['weight_decay'],
-        'batch_size': config['batch_size'],
-        'test_batch_size': config['test_batch_size'],
-        'epochs': min(config['epochs'], int(budget)),
-    }
+def train_model(config, seed = 3, budget: int = 25):
+    try:
+        # Set up model configuration
+        np.random.seed(seed=seed)
+            
+        model_config = {
+            'optimizer': config['optimizer'],
+            'lr': config['lr'],
+            'momentum': config['momentum'],
+            'weight_bits': config['weight_bits'],
+            'activation_integer_bits': config['activation_integer_bits'],
+            'activation_fraction_bits': config['activation_fraction_bits'],
+            'shift_depth': config['shift_depth'],
+            'shift_type': config['shift_type'],
+            'rounding': config['rounding'],
+            'weight_decay': config['weight_decay'],
+            'batch_size': config['batch_size'],
+            'test_batch_size': config['test_batch_size'],
+            'epochs': int(budget)
+        }
 
-    # Set up fixed parameters (update as necessary)
-    fixed_params = {
-        'log_interval': 10,
-        # Other fixed parameters...
-        # 'gpu': None,  # Assuming no specific GPU
-        'dist_url': 'env://',
-        'dist_backend': 'nccl',
-        'world_size': -1,
-        'multiprocessing_distributed': False,
-        'evaluate': False,
-        'use_kernel': False,
-        'save_model': False,
-        'pretrained': True,
-        'freeze': False,
-        'weights': '',
-        'workers': 4,
-        'resume': '',
-        'start_epoch': 0,
-        'print_freq': 50
-    }
+        # Set up fixed parameters (update as necessary)
+        fixed_params = {
+            'log_interval': 10,
+            # Other fixed parameters...
+            'dist_url': 'env://',
+            'dist_backend': 'nccl',
+            'world_size': -1,
+            'multiprocessing_distributed': False,
+            'evaluate': False,
+            'use_kernel': False,
+            'save_model': False,
+            'pretrained': False,
+            'freeze': False,
+            'weights': '',
+            'workers': 4,
+            'resume': '',
+            'start_epoch': 0,
+            'print_freq': 100
+        }
+        fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
 
-    fixed_params['distributed'] = fixed_params['world_size'] > 1 or fixed_params['multiprocessing_distributed']
+        # Set device for training
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(seed)
 
-    # Set device for training
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(seed)
+        # Initialize model using the main_worker function with the new config
+        model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
 
-    # Initialize model using the main_worker function with the new config
-    model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
+        # Train and evaluate the model
+        best_acc1 = 0
+        for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
+            train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
+            val_log = validate(val_loader, model, criterion, model_config, fixed_params)
+            acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
 
-    # Train and evaluate the model using existing train and validate functions
-    best_acc1 = 0
-    for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
-        train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
-        val_log = validate(val_loader, model, criterion, model_config, fixed_params)
-        acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
+            # Update best accuracy
+            best_acc1 = max(acc1, best_acc1)
+            print("calc acc")
 
-        # Update best accuracy
-        best_acc1 = max(acc1, best_acc1)
+        # Check if the accuracy is a finite number
+        if not np.isfinite(acc1):
+            raise ValueError("Non-finite accuracy detected.")
 
-    # Return best accuracy as the metric for SMAC
-    return best_acc1
+        # Return best accuracy as the metric for SMAC
+        return 1 - np.divide(best_acc1,100)
+
+    except Exception as e:
+        print(f"An error occurred during model training or evaluation: {e}")
+        # Optionally, log the error details to a file or external logging system here
+
+        # Return a
 
 
 def main():
     cfg = {
-    'activation_fraction_bits': 11,
-  'activation_integer_bits': 5,
-  'batch_size': 184,
-  'epochs': 100,
-  'lr': 0.01376535177340809,
-  'momentum': 0.6232249074330178,
-  'optimizer': 'adagrad',
-  'rounding': 'deterministic',
-  'shift_depth': 10,
-  'shift_type': 'Q',
-  'test_batch_size': 1364,
-  'weight_bits': 8,
-  'weight_decay': 0.003186370955560786,
-}
+        'activation_fraction_bits': 4,
+        'activation_integer_bits': 4,
+        'batch_size': 355,
+        'epochs': 100,
+        'lr': 0.0846873538693396,
+        'momentum': 0.5016319121915253,
+        'optimizer': 'ranger',
+        'rounding': 'stochastic',
+        'shift_depth': 6,
+        'shift_type': 'Q',
+        'test_batch_size': 527,
+        'weight_bits': 4,
+        'weight_decay': 0.002621919374247543,
+    }
 
 
     fixed_params = {
@@ -858,8 +776,6 @@ def main():
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, cfg, fixed_params))
     else:
         main_worker(fixed_params['gpu'], ngpus_per_node, cfg, fixed_params)
-
-
 
 if __name__ == "__main__":
     main()

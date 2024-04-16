@@ -144,14 +144,14 @@ def main_worker(cfg, fixed_params):
                                          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                      ]))
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg['batch_size'], shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg['batch_size'], shuffle=True, num_workers=1)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.CIFAR10(root="./data", train=False, transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ])),
-        batch_size=cfg['batch_size'], shuffle=False)
+        batch_size=cfg['batch_size'], shuffle=False, num_workers=1)
 
     for epoch in range(cfg['epochs']):
         train(train_loader, model, criterion, optimizer, epoch, cfg)
@@ -320,6 +320,7 @@ def plot_trajectory():
 # [Imports and definitions as in your previous script]
 
 def train_model(config, seed: int = 4, budget: int = 25):
+    print("starting_function")
     try:
         # Set up model configuration
         np.random.seed(seed=seed)
@@ -365,9 +366,10 @@ def train_model(config, seed: int = 4, budget: int = 25):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch.manual_seed(seed)
 
+        print("set params")
         # Initialize model using the main_worker function with the new config
         model, train_loader, val_loader, criterion, optimizer = main_worker(model_config, fixed_params)
-
+        print("init model")
         # Train and evaluate the model
         best_acc1 = 0
         for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
@@ -377,6 +379,7 @@ def train_model(config, seed: int = 4, budget: int = 25):
 
             # Update best accuracy
             best_acc1 = max(acc1, best_acc1)
+            print("calc acc")
 
         # Check if the accuracy is a finite number
         if not np.isfinite(acc1):
@@ -455,8 +458,8 @@ def main():
         cs,
         trial_walltime_limit=2000,  # Set a suitable time limit for each trial
         n_trials=200,  # Total number of configurations to try
-        min_budget=3,  # Minimum number of epochs for training
-        max_budget=15,  # Maximum number of epochs for training
+        min_budget=1,  # Minimum number of epochs for training
+        max_budget=2,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
         name=f'cifar10_mf_epochs{timestamp}'
