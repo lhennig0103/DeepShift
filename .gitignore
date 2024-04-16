@@ -10,3 +10,4 @@ pytorch/models/cifar10/
 pytorch/deepshift/kernels/
 data/
 smac3_output.zip
+smac3_output_old/
