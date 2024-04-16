@@ -30,6 +30,7 @@ from smac.intensifier import Hyperband
 from smac.facade import MultiFidelityFacade as MFFacade
 from smac.facade import AbstractFacade
 from ConfigSpace import ConfigurationSpace, Configuration, Categorical, Integer, Float, InCondition
+from ConfigSpace.conditions import AbstractCondition
 from smac.multi_objective.parego import ParEGO
 
 
@@ -171,16 +172,16 @@ def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
     #     model = torch.nn.DataParallel(model).cuda()
 
 
-    # Initialize distributed training if required
-    if fixed_params['distributed']:
-        if fixed_params['dist_url'] == "env://" and fixed_params['rank'] == -1:
-            fixed_params['rank'] = int(os.environ["RANK"])
-        if fixed_params['multiprocessing_distributed']:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            fixed_params['rank'] = fixed_params['rank'] * ngpus_per_node + gpu
-        dist.init_process_group(backend=fixed_params['dist_backend'], init_method=fixed_params['dist_url'],
-                                world_size=fixed_params['world_size'], rank=fixed_params['rank'])
+    # # Initialize distributed training if required
+    # if fixed_params['distributed']:
+    #     if fixed_params['dist_url'] == "env://" and fixed_params['rank'] == -1:
+    #         fixed_params['rank'] = int(os.environ["RANK"])
+    #     if fixed_params['multiprocessing_distributed']:
+    #         # For multiprocessing distributed training, rank needs to be the
+    #         # global rank among all the processes
+    #         fixed_params['rank'] = fixed_params['rank'] * ngpus_per_node + gpu
+    #     dist.init_process_group(backend=fixed_params['dist_backend'], init_method=fixed_params['dist_url'],
+    #                             world_size=fixed_params['world_size'], rank=fixed_params['rank'])
 
     # Create model
     if 'model' in fixed_params and cfg['model']:  # If a model path is specified in cfg
@@ -658,20 +659,21 @@ class ProgressMeter(object):
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
     
+
 def create_configspace():
     cs = ConfigurationSpace()
     desired_sums = [8, 16, 32]
 
-    batch_size = Integer("batch_size", (32, 512), default = 128)
+    batch_size = Integer("batch_size", (32, 128), default = 64)
     test_batch_size = Integer("test_batch_size", (500, 2000), default = 1000)
-    optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelte", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
+    optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelta", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
     lr = Float("lr", (0.001, 0.2), default = 0.1)
     momentum = Float("momentum", (0.0, 0.9), default=0.9)
     epochs = Integer("epochs", (40, 150), default = 80)
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
-    shift_depth = Integer("shift_depth", (0, 20), default = 20)
+    shift_depth = Integer("shift_depth", (0, 19), default = 19)
     shift_type = Categorical("shift_type", ["Q", "PS"], default = "PS")
     # use_kernel = Categorical("use_kernel", ["False"])
     rounding = Categorical("rounding", ["deterministic", "stochastic"], default = "deterministic")
@@ -830,7 +832,7 @@ def train_model(config, seed: int = 4, budget: int = 25):
     train_emissions = tracker.final_emissions
 
     return {
-        "accuracy": 1 - best_acc1,  # Assuming best_acc1 is your accuracy metric
+        "loss": 1 - np.divide(best_acc1,100),  # Assuming best_acc1 is your accuracy metric
         "emissions": train_energy,  # Emissions measured
     }
     
@@ -846,7 +848,7 @@ def train_model(config, seed: int = 4, budget: int = 25):
 def main():
     cs = create_configspace()
     # objectives = ["accuracy", "time"]
-    objectives = ["accuracy", "emissions"]
+    objectives = ["loss", "emissions"]
     facades: list[AbstractFacade] = []
 
     # Get the current date and time
@@ -859,17 +861,18 @@ def main():
         cs,
         objectives = objectives,
         trial_walltime_limit=2000,  # Set a suitable time limit for each trial
-        n_trials=200,  # Total number of configurations to try
-        min_budget=40,  # Minimum number of epochs for training
-        max_budget=150,  # Maximum number of epochs for training
+        n_trials=100,  # Total number of configurations to try
+        min_budget=5,  # Minimum number of epochs for training
+        max_budget=80,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
-        name=f'MO-codecarbon{timestamp}'
+        name=f'MO-codecarbon{timestamp}',
+        seed=2
     )
 
     # Create the intensifier object
     intensifier_object = Hyperband
-    intensifier = intensifier_object(scenario, incumbent_selection="highest_budget")
+    intensifier = intensifier_object(scenario, incumbent_selection="any_budget")
 
     # Initial design for random configurations
     initial_design = MFFacade.get_initial_design(scenario, n_configs=5)

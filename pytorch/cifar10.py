@@ -68,6 +68,7 @@ is to provide a valid pytorch implementation of ResNet-s for CIFAR10 as describe
 # Set the start method for multiprocessing
 if __name__ == '__main__':
     mp.set_start_method('spawn')
+
     
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -78,7 +79,9 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: resnet18)')
+                        ' (default: resnet20)')
+parser.add_argument('--seed', default=None, type=int,
+                    help='seed for initializing training. ')
 
 best_acc1 = 0
 args = parser.parse_args()
@@ -89,6 +92,18 @@ optimization_log = []
 
 
 def main_worker(gpu, ngpus_per_node, cfg, fixed_params):
+    seed = 5 # Define a fixed seed for reproducibility
+    
+    # Set the seed for random number generators in numpy, random, and torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For CUDA
+    
+    # Ensure deterministic behavior in CuDNN (may impact performance)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     global best_acc1
     if fixed_params['distributed']:
         if fixed_params['dist_url'] == "env://" and fixed_params['rank'] == -1:
@@ -587,12 +602,12 @@ class ProgressMeter(object):
 def create_configspace():
     cs = ConfigurationSpace()
     desired_sums = [8, 16, 32]
-    batch_size = Integer("batch_size", (32, 512), default = 128)
-    test_batch_size = Integer("test_batch_size", (500, 2000), default = 1000)
-    optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelte", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
+    batch_size = Integer("batch_size", (32, 512), default = 64)
+    test_batch_size = Integer("test_batch_size", (500, 1000), default = 750)
+    optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelta", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
     lr = Float("lr", (0.001, 0.2), default = 0.1)
     momentum = Float("momentum", (0.0, 0.9), default=0.9)
-    epochs = Integer("epochs", (40, 150), default = 80)
+    epochs = Integer("epochs", (5,100), default = 15)
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
@@ -649,10 +664,19 @@ def plot_trajectory():
 
 # [Imports and definitions as in your previous script]
 
-def train_model(config, seed: int = 4, budget: int = 25):
+def train_model(config, seed: int = 5, budget: int = 25):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
+    
+    # Ensure reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     try:
         # Set up model configuration
-        np.random.seed(seed=seed)
+        np.random.seed(seed)
             
         model_config = {
             'optimizer': config['optimizer'],
@@ -661,13 +685,13 @@ def train_model(config, seed: int = 4, budget: int = 25):
             'weight_bits': config['weight_bits'],
             'activation_integer_bits': config['activation_integer_bits'],
             'activation_fraction_bits': config['activation_fraction_bits'],
-            'shift_depth': config['shift_depth'],
+            'shift_depth': int(budget),
             'shift_type': config['shift_type'],
             'rounding': config['rounding'],
             'weight_decay': config['weight_decay'],
             'batch_size': config['batch_size'],
             'test_batch_size': config['test_batch_size'],
-            'epochs': int(budget)
+            'epochs': config['epochs']
         }
 
         # Set up fixed parameters (update as necessary)
@@ -681,7 +705,7 @@ def train_model(config, seed: int = 4, budget: int = 25):
             'evaluate': False,
             'use_kernel': False,
             'save_model': False,
-            'pretrained': True,
+            'pretrained': False,
             'freeze': False,
             'weights': '',
             'workers': 4,
@@ -707,13 +731,14 @@ def train_model(config, seed: int = 4, budget: int = 25):
 
             # Update best accuracy
             best_acc1 = max(acc1, best_acc1)
+            print("calc acc")
 
         # Check if the accuracy is a finite number
         if not np.isfinite(acc1):
             raise ValueError("Non-finite accuracy detected.")
 
         # Return best accuracy as the metric for SMAC
-        return 1 - best_acc1
+        return 1 - np.divide(best_acc1,100)
 
     except Exception as e:
         print(f"An error occurred during model training or evaluation: {e}")
@@ -724,6 +749,19 @@ def train_model(config, seed: int = 4, budget: int = 25):
 
 def main():
     global best_acc1
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        cudnn.deterministic = True
+        warnings.warn('You have chosen to seed training. '
+                      'This will turn on the CUDNN deterministic setting, '
+                      'which can slow down your training considerably! '
+                      'You may see unexpected behavior when restarting '
+                      'from checkpoints.')
+    
+    # Ensure reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # Define fixed parameters (you might need to modify this based on your script's needs)
     fixed_params = {
@@ -736,7 +774,7 @@ def main():
         'evaluate': False,
         'use_kernel': False,
         'save_model': False,
-        'pretrained': True,
+        'pretrained': False,
         'freeze': False,
         'weights': '',
         'workers': 4,
@@ -786,13 +824,15 @@ def main():
 
     scenario = Scenario(
         cs,
-        trial_walltime_limit=2000,  # Set a suitable time limit for each trial
-        n_trials=200,  # Total number of configurations to try
-        min_budget=30,  # Minimum number of epochs for training
-        max_budget=150,  # Maximum number of epochs for training
+        trial_walltime_limit=4000,  # Set a suitable time limit for each trial
+        n_trials=50,  # Total number of configurations to try
+        min_budget=1,  # Minimum number of epochs for training
+        max_budget=20,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
-        name=f'cifar10_mf_epochs{timestamp}'
+        name=f'cifar10_mf_shiftdepth{timestamp}',
+        deterministic = False,
+        seed=0
     )
 
     # Create the intensifier object
