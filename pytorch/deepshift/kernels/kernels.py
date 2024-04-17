@@ -1,7 +1,7 @@
 import torch
 import time
 import torch.nn.functional as F
-import deepshift_cpu
+# import deepshift_cpu
 
 def linear(input, shift, sign, bias=None, conc_weight=None, use_cuda=True):
     if(use_cuda):   
@@ -16,7 +16,7 @@ def linear(input, shift, sign, bias=None, conc_weight=None, use_cuda=True):
         # # end_time = time.time()
         # # print("Linear Time:", end_time - start_time )    
     else:
-        out = deepshift_cpu.linear_kernel(input.detach().numpy(), shift.detach().numpy(), sign.detach().numpy(), bias.detach().numpy())
+        # out = deepshift_cpu.linear_kernel(input.detach().numpy(), shift.detach().numpy(), sign.detach().numpy(), bias.detach().numpy())
         out = torch.Tensor(out)
 
     return out

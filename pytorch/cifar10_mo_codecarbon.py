@@ -860,17 +860,10 @@ def main():
     scenario = Scenario(
         cs,
         objectives = objectives,
-<<<<<<< HEAD
-        trial_walltime_limit=4000,  # Set a suitable time limit for each trial
-        n_trials=100,  # Total number of configurations to try
-        min_budget=1,  # Minimum number of epochs for training
-        max_budget=30,  # Maximum number of epochs for training
-=======
         trial_walltime_limit=2000,  # Set a suitable time limit for each trial
         n_trials=100,  # Total number of configurations to try
-        min_budget=5,  # Minimum number of epochs for training
-        max_budget=80,  # Maximum number of epochs for training
->>>>>>> 73a2a516db9be725856a13899bd7aa91aa163967
+        min_budget=1,  # Minimum number of epochs for training
+        max_budget=25,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
         name=f'MO-codecarbon{timestamp}',
