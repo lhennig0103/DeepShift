@@ -9,4 +9,4 @@
 source /opt/software/pc2/EB-SW/software/Anaconda3/2022.05/etc/profile.d/conda.sh
 conda activate dsnn_smac
 
-python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/cifar10_mo_codecarbon.py --arch resnet20
+python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/cifar10_momf_second_try.py --arch resnet20

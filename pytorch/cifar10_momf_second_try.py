@@ -154,6 +154,8 @@ args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
+num_train_epochs = 25
+
 def create_configspace():
     cs = ConfigurationSpace()
 
@@ -161,7 +163,7 @@ def create_configspace():
     optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelta", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
     lr = Float("lr", (0.001, 0.2), default = 0.1)
     momentum = Float("momentum", (0.0, 0.9), default=0.9)
-    epochs = Integer("epochs", (40, 150), default = 80)
+    epochs = Integer("epochs", (2,num_train_epochs), default = 15)
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
@@ -207,8 +209,7 @@ def main():
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
     assert len(args.activation_bits)==2, "activation-bits argument needs to be a tuple of 2 values representing number of integer bits and number of fraction bits, e.g., '3 5' for 8-bits fixed point or '3 13' for 16-bits fixed point"
-    [args.activation_integer_bits, args.activation_fraction_bits] = args.activation_bits
-    [args.activation_integer_bits, args.activation_fraction_bits] = [int(args.activation_integer_bits), int(args.activation_fraction_bits)]
+
 
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
@@ -222,22 +223,24 @@ def main():
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
-    cs = create_configspace()
+    config = create_configspace()
     objectives = ["loss", "emissions"]
     current_datetime = datetime.datetime.now()
     timestamp = current_datetime.strftime("%Y%m%d%H%M%S")
 
     scenario = Scenario(
-        cs,
+        config,
         objectives = objectives,
-        trial_walltime_limit=2000,  # Set a suitable time limit for each trial
+        trial_walltime_limit=3500,  # Set a suitable time limit for each trial
         n_trials=100,  # Total number of configurations to try
         min_budget=2,  # Minimum number of epochs for training
-        max_budget=25,  # Maximum number of epochs for training
+        max_budget=num_train_epochs,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
         name=f'MO-codecarbon{timestamp}',
-        seed=1
+        seed=1,
+        crash_cost=[1000,1000],
+        termination_cost_threshold=[1001,1001]
     )
 
     intensifier_object = Hyperband
@@ -317,9 +320,9 @@ def main_worker(gpu, ngpus_per_node, config):
                 
             model.load_state_dict(new_state_dict)
 
-    if args.shift_depth > 0:
-        model, _ = convert_to_shift(model, args.shift_depth, args.shift_type, convert_weights = (args.pretrained != "none" or args.weights), use_kernel = args.use_kernel, rounding = args.rounding, weight_bits = args.weight_bits, act_integer_bits = args.activation_integer_bits, act_fraction_bits = args.activation_fraction_bits)
-    elif args.use_kernel and args.shift_depth == 0:
+    if config['shift_depth'] > 0:
+        model, _ = convert_to_shift(model, config['shift_depth'], config['shift_type'], convert_weights = (args.pretrained != "none" or args.weights), use_kernel = args.use_kernel, rounding = config['rounding'], weight_bits = config['weight_bits'], act_integer_bits = config['activation_integer_bits'], act_fraction_bits = config['activation_fraction_bits'])
+    elif args.use_kernel and config['shift_depth'] == 0:
         model = convert_to_unoptimized(model)
 
     if args.distributed:
@@ -332,7 +335,7 @@ def main_worker(gpu, ngpus_per_node, config):
             # When using a single GPU per process and per
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
+            config['batch_size'] = int(config['batch_size'] / ngpus_per_node)
             args.workers = int(args.workers / ngpus_per_node)
             #TODO: Allow args.gpu to be a list of IDs
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
@@ -370,27 +373,29 @@ def main_worker(gpu, ngpus_per_node, config):
 
     params_dict = [
         {"params": model_other_params},
-        {"params": model_sign_params, 'lr': args.lr_sign if args.lr_sign is not None else args.lr, 'weight_decay': 0},
-        {"params": model_shift_params, 'lr': args.lr, 'weight_decay': 0}
+        {"params": model_sign_params, 'lr': args.lr_sign if args.lr_sign is not None else config['lr'], 'weight_decay': 0},
+        {"params": model_shift_params, 'lr': config['lr'], 'weight_decay': 0}
         ]
 
-    # define optimizer
-    if(args.optimizer.lower() == "sgd"):
-        optimizer = torch.optim.SGD(params_dict, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adadelta"):
-        optimizer = torch.optim.Adadelta(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adagrad"):
-        optimizer = torch.optim.Adagrad(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "adam"):
-        optimizer = torch.optim.Adam(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "rmsprop"):
-        optimizer = torch.optim.RMSprop(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "radam"):
-        optimizer = optim.RAdam(params_dict, args.lr, weight_decay=args.weight_decay)
-    elif(args.optimizer.lower() == "ranger"):
-        optimizer = optim.Ranger(params_dict, args.lr, weight_decay=args.weight_decay)
+    # Define optimizer based on cfg
+    optimizer = None
+    optimizer_type = config['optimizer'].lower()
+    if optimizer_type == "sgd":
+        optimizer = torch.optim.SGD(params_dict, config['lr'], momentum=config['momentum'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "adadelta":
+        optimizer = torch.optim.Adadelta(params_dict, config['lr'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "adagrad":
+        optimizer = torch.optim.Adagrad(params_dict, config['lr'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "adam":
+        optimizer = torch.optim.Adam(params_dict, config['lr'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "rmsprop":
+        optimizer = torch.optim.RMSprop(params_dict, config['lr'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "radam":
+        optimizer = optim.RAdam(params_dict, config['lr'], weight_decay=config['weight_decay'])
+    elif optimizer_type == "ranger":
+        optimizer = optim.Ranger(params_dict, config['lr'], weight_decay=config['weight_decay'])
     else:
-        raise ValueError("Optimizer type: ", args.optimizer, " is not supported or known")
+        raise ValueError("Optimizer type: ", optimizer_type, " is not supported or known")
 
     # define learning rate schedule
     if (args.lr_schedule):
@@ -404,7 +409,7 @@ def main_worker(gpu, ngpus_per_node, config):
         # for resnet1202 original paper uses lr=0.01 for first 400 minibatches for warm-up
         # then switch back. In this implementation it will correspond for first epoch.
         for param_group in optimizer.param_groups:
-            param_group['lr'] = args.lr*0.1
+            param_group['lr'] = config['lr']*0.1
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -440,8 +445,8 @@ def main_worker(gpu, ngpus_per_node, config):
     # name model sub-directory "shift_all" if all layers are converted to shift layers
     conv2d_layers_count = count_layer_type(model, nn.Conv2d) + count_layer_type(model, unoptimized.UnoptimizedConv2d)
     linear_layers_count = count_layer_type(model, nn.Linear) + count_layer_type(model, unoptimized.UnoptimizedLinear)
-    if (args.shift_depth > 0):
-        if (args.shift_type == 'Q'):
+    if (config['shift_depth'] > 0):
+        if (config['shift_type'] == 'Q'):
             shift_label = "shift_q"
         else:
             shift_label = "shift_ps"
@@ -451,10 +456,10 @@ def main_worker(gpu, ngpus_per_node, config):
     if (conv2d_layers_count==0 and linear_layers_count==0):
         shift_label += "_all"
     else:
-        shift_label += "_%s" % (args.shift_depth)
+        shift_label += "_%s" % (config['shift_depth'])
 
-    if (args.shift_depth > 0):
-        shift_label += "_wb_%s" % (args.weight_bits)
+    if (config['shift_depth'] > 0):
+        shift_label += "_wb_%s" % (config['weight_bits'])
 
     if (args.desc is not None and len(args.desc) > 0):
         desc_label = "_%s" % (args.desc)
@@ -503,7 +508,7 @@ def main_worker(gpu, ngpus_per_node, config):
         train_sampler = None
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        train_dataset, batch_size=config['batch_size'], shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
@@ -514,7 +519,7 @@ def main_worker(gpu, ngpus_per_node, config):
                 transforms.ToTensor(),
                 normalize,
         ])),
-        batch_size=args.batch_size, shuffle=False,
+        batch_size=config['batch_size'], shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
     start_time = time.time()
@@ -534,7 +539,7 @@ def main_worker(gpu, ngpus_per_node, config):
             train_log_csv = csv.writer(train_log_file)
             train_log_csv.writerow(['epoch', 'train_loss', 'train_top1_acc', 'train_time', 'test_loss', 'test_top1_acc', 'test_time'])
 
-        for epoch in range(args.start_epoch, args.epochs):
+        for epoch in range(args.start_epoch, config['epochs']):
             if args.distributed:
                 train_sampler.set_epoch(epoch)
 
@@ -713,7 +718,7 @@ def validate(val_loader, model, criterion, args):
 
     return (losses.avg, top1.avg.cpu().numpy(), batch_time.avg)
 
-def train_model(config, seed: int = 0, budget: int = 25):
+def train_model(config,seed: int = 0, budget: int = 25):
     model_config = {
         'optimizer': config['optimizer'],
         'lr': config['lr'],
@@ -741,7 +746,7 @@ def train_model(config, seed: int = 0, budget: int = 25):
 
             # Train and evaluate the model using existing train and validate functions
             best_acc1 = 0
-            for epoch in range(0, model_config['epochs']):
+            for epoch in range(0, config['epochs']):
                 train(train_loader, model, criterion, optimizer, epoch, model_config)
                 val_log = validate(val_loader, model, criterion, model_config)
                 acc1 = val_log[1]  # Assuming acc1 is the second value in val_log

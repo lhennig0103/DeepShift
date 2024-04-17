@@ -82,6 +82,8 @@ best_acc1 = 0
 args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+num_train_epochs = 25
+
 
 # def main(cfg, fixed_params):
 #     global best_acc1
@@ -669,7 +671,7 @@ def create_configspace():
     optimizer = Categorical("optimizer", ["SGD", "Adam", "adadelta", "adagrad", "rmsprop", "radam", "ranger"], default = "SGD")
     lr = Float("lr", (0.001, 0.2), default = 0.1)
     momentum = Float("momentum", (0.0, 0.9), default=0.9)
-    epochs = Integer("epochs", (40, 150), default = 80)
+    epochs = Integer("epochs", (2,num_train_epochs), default = 15)
     weight_bits = Integer("weight_bits", (2, 8), default = 5)
     activation_integer_bits = Integer("activation_integer_bits", (2, 32), default = 16)
     activation_fraction_bits = Integer("activation_fraction_bits", (2, 32), default = 16)
@@ -811,37 +813,37 @@ def train_model(config, seed: int = 4, budget: int = 25):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
 
-    with EmissionsTracker(tracking_mode='process', log_level='critical') as tracker:
-        # Initialize model using the main_worker function with the new config
-        model, train_loader, val_loader, criterion, optimizer = main_worker(0, 1, model_config, fixed_params)
+    try:
+        with EmissionsTracker(tracking_mode='process', log_level='critical') as tracker:
+            # Initialize model using the main_worker function with the new config
+            model, train_loader, val_loader, criterion, optimizer = main_worker(0,1,model_config, fixed_params)
 
-        # Train and evaluate the model using existing train and validate functions
-        best_acc1 = 0
-        for epoch in range(fixed_params['start_epoch'], model_config['epochs']):
-            train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
-            val_log = validate(val_loader, model, criterion, model_config, fixed_params)
-            acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
+            # Train and evaluate the model using existing train and validate functions
+            best_acc1 = 0
+            for epoch in range(0, config['epochs']):
+                train(train_loader, model, criterion, optimizer, epoch, model_config, fixed_params)
+                val_log = validate(val_loader, model, criterion, model_config)
+                acc1 = val_log[1]  # Assuming acc1 is the second value in val_log
 
-            # Update best accuracy
-            best_acc1 = max(acc1, best_acc1)
+                # Update best accuracy
+                best_acc1 = max(acc1, best_acc1)
 
-        # emissions = tracker.stop()
+            # emissions = tracker.stop()
+                
             
-    	
-    train_energy = tracker.final_emissions_data.energy_consumed
-    train_emissions = tracker.final_emissions
+        train_energy = tracker.final_emissions_data.energy_consumed
+        train_emissions = tracker.final_emissions
 
-    return {
-        "loss": 1 - np.divide(best_acc1,100),  # Assuming best_acc1 is your accuracy metric
-        "emissions": train_energy,  # Emissions measured
-    }
-    
-
-    # Return best accuracy as the metric for SMAC
-    # return {
-    #         "accuracy": best_acc1,
-    #         "time": time.time() - start_time,
-    #     }
+        return {
+            "loss": 1 - np.divide(best_acc1,100),  # Assuming best_acc1 is your accuracy metric
+            "emissions": train_energy,  # Emissions measured
+        }
+    except Exception as e:
+        print(e)
+        return {
+            "loss": float("inf"),
+            "emissions": float("inf")
+        }
 
 
 
@@ -860,14 +862,16 @@ def main():
     scenario = Scenario(
         cs,
         objectives = objectives,
-        trial_walltime_limit=2000,  # Set a suitable time limit for each trial
+        trial_walltime_limit=3500,  # Set a suitable time limit for each trial
         n_trials=100,  # Total number of configurations to try
-        min_budget=5,  # Minimum number of epochs for training
-        max_budget=80,  # Maximum number of epochs for training
+        min_budget=2,  # Minimum number of epochs for training
+        max_budget=num_train_epochs,  # Maximum number of epochs for training
         n_workers=1,  # Number of parallel workers (set based on available resources)
         use_default_config = True,
         name=f'MO-codecarbon{timestamp}',
-        seed=2
+        seed=2,
+        crash_cost=[1000,1000],
+        termination_cost_threshold=[1001,1001]
     )
 
     # Create the intensifier object
