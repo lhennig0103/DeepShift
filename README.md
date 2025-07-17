@@ -1,3 +1,19 @@
+# AutoDSNN
+This is a fork of the original DeepShift repository by Elhoushi et al. (2021).
+
+# Abstract
+
+Deep Learning (DL) has advanced various fields by extracting complex patterns from large datasets.
+However, the computational demands of DL models pose environmental and resource challenges. Deep Shift Neural Networks (DSNNs) present a solution by leveraging shift operations to reduce computational complexity at inference.
+Compared to common DNNs, DSNNs are still less well understood and less well optimized. 
+By leveraging AutoML techniques, we provide valuable insights into the potential of DSNNs and how to design them in a better way.
+We focus on image classification, a core task in computer vision, especially in low-resource environments.
+Since we consider complementary objectives such as accuracy and energy consumption, we combine state-of-the-art multi-fidelity (MF) hyperparameter optimization (HPO) with multi-objective optimization to find a set of Pareto optimal trade-offs on how to design DSNNs.
+Our approach led to significantly better configurations of DSNNs regarding loss and emissions compared to default DSNNs. This includes simultaneously increasing performance by about 20\% and reducing emissions, in some cases by more than 60\%.
+Investigating the behavior of quantized networks in terms of both emissions and accuracy, our experiments reveal surprising model-specific trade-offs, yielding the greatest energy savings.
+For example, in contrast to common expectations, quantizing smaller portions of the network with low precision can be optimal with respect to energy consumption while retaining or improving performance.
+We corroborated these findings across multiple backbone architectures, highlighting important nuances in quantization strategies and offering an automated approach to balancing energy efficiency and model performance.
+
 # DeepShift
 This project is the implementation of the **DeepShift: Towards Multiplication-Less Neural Networks**  paper, that aims to replace multiplications in a neural networks with bitwise shift (and sign change).
 
