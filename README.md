@@ -1,5 +1,22 @@
 # AutoDSNN
-This is a fork of the original DeepShift repository by Elhoushi et al. (2021).
+
+This is a fork of the original [DeepShift repository](https://github.com/mostafaelhoushi/DeepShift) by Elhoushi et al. (2021).
+
+## About this Fork
+
+This repository extends DeepShift into an **AutoML framework** for optimizing Deep Shift Neural Networks (DSNNs) with energy and performance in mind. It introduces:
+
+- 🔧 **Automated Hyperparameter Optimization (HPO)** using multi-objective and multi-fidelity optimization
+- 🎯 **Pareto-efficient search** over accuracy and emissions
+- 📊 **Training scripts** for CIFAR-10, Caltech101, and TinyImageNet
+- 🌱 **Energy tracking ** via [CodeCarbon](https://github.com/mlco2/codecarbon)
+
+# Publications
+
+- Hennig, Lindauer. "Leveraging AutoML for Sustainable Deep Learning: A Multi-Objective HPO Approach on Deep Shift Neural Networks". In Transactions on Machine Learning Research (Accepted, 2025).
+- Hennig, Tornede, Lindauer. "Towards Leveraging AutoML for Sustainable Deep Learning: A Multi-Objective HPO Approach on Deep Shift Neural Networks". In PML4LRS Workshop @ ICLR (2024).
+
+---
 
 # Abstract
 
