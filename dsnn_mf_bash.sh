@@ -7,6 +7,6 @@
 #SBATCH --gres=gpu:a100:3
 
 source /opt/software/pc2/EB-SW/software/Anaconda3/2022.05/etc/profile.d/conda.sh
-conda activate dsnn_smac
+conda activate DeepShift_270525 
 
 python /scratch/hpc-prf-intexml/leonahennig/DeepShift/pytorch/smac_dsnn_mf_short.py
