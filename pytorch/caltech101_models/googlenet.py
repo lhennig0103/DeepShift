@@ -1,4 +1,3 @@
-'''GoogLeNet with PyTorch.'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,7 +54,7 @@ class Inception(nn.Module):
 
 
 class GoogLeNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=101):
         super(GoogLeNet, self).__init__()
         self.pre_layers = nn.Sequential(
             nn.Conv2d(3, 192, kernel_size=3, padding=1),
@@ -77,8 +76,9 @@ class GoogLeNet(nn.Module):
         self.a5 = Inception(832, 256, 160, 320, 32, 128, 128)
         self.b5 = Inception(832, 384, 192, 384, 48, 128, 128)
 
-        self.avgpool = nn.AvgPool2d(8, stride=1)
-        self.linear = nn.Linear(1024, 10)
+        # Reduce the size of the feature map to (1, 1) with AdaptiveAvgPool2d(1)
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.linear = nn.Linear(1024, num_classes)
 
     def forward(self, x):
         out = self.pre_layers(x)
@@ -93,10 +93,11 @@ class GoogLeNet(nn.Module):
         out = self.maxpool(out)
         out = self.a5(out)
         out = self.b5(out)
-        out = self.avgpool(out)
-        out = out.view(out.size(0), -1)
-        out = self.linear(out)
+        out = self.avgpool(out)  # Adaptive average pooling to reduce spatial size to (1, 1)
+        out = out.view(out.size(0), -1)  # Flatten the feature map
+        out = self.linear(out)  # Pass to the linear layer
         return out
+
 
 def googlenet():
     return GoogLeNet()
@@ -105,8 +106,8 @@ def inception():
     return Inception()
 
 def test():
-    net = GoogLeNet()
-    x = torch.randn(1,3,32,32)
+    net = GoogLeNet(num_classes=101)
+    x = torch.randn(1, 3, 224, 224)  # Use a larger input size for testing
     y = net(x)
     print(y.size())
 
